@@ -1,0 +1,47 @@
+' QBOPTS: /W
+' Event trapping
+ON KEY(1) GOSUB KeyHandler
+KEY(1) ON
+ON TIMER(5) GOSUB TimerHandler
+TIMER ON
+ON PLAY(4) GOSUB PlayHandler
+PLAY ON
+ON STRIG(0) GOSUB StrigHandler
+STRIG(0) ON
+ON COM(1) GOSUB ComHandler
+COM(1) ON
+ON PEN GOSUB PenHandler
+PEN ON
+KEY 2, "LIST"
+KEY ON
+KEY OFF
+KEY LIST
+KEY(1) STOP
+KEY(1) OFF
+TIMER STOP
+TIMER OFF
+PLAY STOP
+PLAY OFF
+STRIG(0) STOP
+STRIG(0) OFF
+COM(1) STOP
+COM(1) OFF
+PEN STOP
+PEN OFF
+STRIG ON
+STRIG OFF
+END
+KeyHandler:
+    PRINT "key"
+    RETURN
+TimerHandler:
+    PRINT "timer"
+    RETURN
+PlayHandler:
+    RETURN
+StrigHandler:
+    RETURN
+ComHandler:
+    RETURN
+PenHandler:
+    RETURN

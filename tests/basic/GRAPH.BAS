@@ -1,0 +1,58 @@
+' Graphics statements
+DIM img%(100)
+SCREEN 1
+SCREEN 1, 0
+SCREEN , , 0, 0
+COLOR 1, 2
+COLOR , 3
+CLS
+CLS 2
+x% = 10: y% = 20: fx = 5.5: fy = 6.5
+PSET (x%, y%)
+PSET (x%, y%), 2
+PSET STEP(1, 1), 3
+PRESET (fx, fy)
+PRESET (fx, fy), 1
+LINE (0, 0)-(100, 100)
+LINE (0, 0)-(100, 100), 2
+LINE (10, 10)-(50, 50), 3, B
+LINE (10, 10)-(50, 50), 3, BF
+LINE -(150, 150), 1
+LINE (fx, fy)-STEP(10, 10), 2, , &HFF00
+CIRCLE (160, 100), 50
+CIRCLE (160, 100), 50, 2
+CIRCLE (160, 100), 50, 2, 0, 3.14
+CIRCLE (160, 100), 50, , , , 0.5
+CIRCLE STEP(5, 5), fx, 1
+DRAW "U10 R10 D10 L10"
+PAINT (160, 100), 2, 3
+PAINT (160, 100), "AB", 3
+GET (0, 0)-(10, 10), img%
+PUT (20, 20), img%
+PUT (40, 40), img%, PSET
+PUT (60, 60), img%, XOR
+c% = POINT(10, 10)
+c% = POINT(fx, fy)
+z = POINT(0)
+z = PMAP(fx, 0)
+VIEW (10, 10)-(200, 150), 1, 2
+VIEW SCREEN (10, 10)-(200, 150)
+VIEW
+WINDOW (-1, -1)-(1, 1)
+WINDOW SCREEN (0, 0)-(100, 100)
+WINDOW
+SCREEN 0
+WIDTH 40
+LOCATE 5, 10
+LOCATE , 20
+LOCATE 1, 1, 1, 7, 8
+VIEW PRINT 2 TO 20
+VIEW PRINT
+PALETTE 1, 4
+PALETTE
+PCOPY 0, 1
+r% = CSRLIN
+p% = POS(0)
+c% = SCREEN(1, 1)
+c% = SCREEN(1, 1, 1)
+END

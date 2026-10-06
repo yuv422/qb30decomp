@@ -1,0 +1,11 @@
+' QBOPTS: /E /X
+' Line numbers and ERL
+10 ON ERROR GOTO 1000
+20 x = 5
+30 ERROR 7
+40 PRINT "back"; x
+50 y = LOG(-1)
+60 END
+1000 PRINT "error"; ERR; "at line"; ERL
+1010 IF ERL = 30 THEN RESUME NEXT
+1020 RESUME 60

@@ -1,0 +1,40 @@
+' String functions and statements
+a$ = "Hello, World"
+b$ = LEFT$(a$, 5)
+b$ = RIGHT$(a$, 5)
+b$ = MID$(a$, 3, 4)
+b$ = MID$(a$, 3)
+n% = LEN(a$)
+n% = INSTR(a$, "o")
+n% = INSTR(4, a$, "o")
+b$ = CHR$(65)
+n% = ASC(a$)
+b$ = STR$(n%)
+b$ = STR$(1.5)
+d# = 2.5#
+b$ = STR$(d#)
+x = VAL("3.25")
+b$ = SPACE$(4)
+b$ = STRING$(5, 42)
+b$ = STRING$(3, "xyz")
+b$ = HEX$(255)
+b$ = OCT$(8)
+b$ = MKI$(n%)
+b$ = MKS$(x)
+b$ = MKD$(d#)
+n% = CVI(b$)
+x = CVS(b$)
+d# = CVD(b$)
+b$ = a$ + "!" + b$
+MID$(a$, 1, 2) = "JE"
+MID$(a$, 4) = "xx"
+b$ = DATE$
+b$ = TIME$
+b$ = INKEY$
+b$ = COMMAND$
+b$ = ENVIRON$("PATH")
+b$ = ENVIRON$(1)
+b$ = LEFT$(a$ + b$, n% + 1)
+IF LEFT$(a$, 1) = "H" THEN PRINT "starts with H"
+PRINT a$; b$; n%; x; d#
+END
