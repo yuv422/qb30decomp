@@ -23,6 +23,7 @@ struct OutLine {
     int indent = 0;
     std::string text;
     int label = -1;   // label definition for this code address (emitted only when referenced)
+    std::vector<uint16_t> lineNos; // BASIC line numbers defined at this line
 };
 
 struct Ctx {
@@ -59,12 +60,14 @@ public:
             std::vector<std::string>& warnings)
         : program_(program), results_(results), info_(info), pinfo_(pinfo), warnings_(warnings), printer_(names_) {
         setupNames();
+        setupLineNumbers();
     }
 
     std::string run(const DecompileOptions& opt, const std::string& inputName);
 
 private:
     void setupNames();
+    void setupLineNumbers();
     ProcView makeView(uint32_t pi);
     bool isForwarder(const ProcView& v, int b) const;
     int resolve(const ProcView& v, int b) const;
@@ -88,13 +91,27 @@ private:
     const Block& blk(const ProcView& v, int b) const { return v.proc->blocks[size_t(b)]; }
     TermKind term(const ProcView& v, int b) const { return blk(v, b).term; }
 
-    void line(int ind, const std::string& text) { out_.push_back({ind, text, -1}); }
-    void labelLine(uint16_t addr) { out_.push_back({0, "", int(addr)}); }
+    void line(int ind, const std::string& text) {
+        out_.push_back({ind, text, -1, pendingLines_});
+        pendingLines_.clear();
+    }
+    void labelLine(uint16_t addr) {
+        // line numbers of code before the label stay in front of it
+        if (!pendingLines_.empty()) out_.push_back({0, "", -2, pendingLines_});
+        pendingLines_.clear();
+        OutLine l{0, "", int(addr), {}};
+        auto it = lineAt_.find(addr);
+        if (it != lineAt_.end()) l.lineNos = it->second;
+        out_.push_back(l);
+    }
+    // line numbers that start inside block b, by statement (last entry: after the statements)
+    std::vector<std::vector<uint16_t>> blockLines(const ProcView& v, int b) const;
 
     void region(ProcView& v, int lo, const Ctx& ctx, int ind);
     void emitBody(ProcView& v, int b, const Ctx& ctx, int ind, size_t dropTail = 0);
     void emitTerm(ProcView& v, int b, const Ctx& ctx, int ind);
     bool tryIf(ProcView& v, int i, const Ctx& ctx, int ind, int& next);
+    bool trySelect(ProcView& v, int i, const Ctx& ctx, int ind, int& next);
     bool tryLoop(ProcView& v, int i, const Ctx& ctx, int ind, int& next);
     bool tryFor(ProcView& v, int i, const Ctx& ctx, int ind, int& next);
     std::string jumpText(const ProcView& v, int target, const Ctx& ctx);
@@ -122,6 +139,8 @@ private:
     std::vector<OutLine> out_;
     std::set<uint16_t> refLabels_;
     std::map<uint16_t, uint16_t> labelCanon_; // address -> address of the live block that holds the label
+    std::map<uint16_t, std::vector<uint16_t>> lineAt_; // code address -> line numbers starting there
+    std::vector<uint16_t> pendingLines_;               // line numbers for the next output line
     const ProcView* cur_ = nullptr;
 };
 
@@ -147,8 +166,30 @@ void Emitter::setupNames() {
         auto it = labelCanon_.find(a);
         if (it != labelCanon_.end()) a = it->second;
         refLabels_.insert(a);
+        auto ln = lineAt_.find(a);
+        if (ln != lineAt_.end()) return std::to_string(ln->second.front());
         return "loc" + hex4(a);
     };
+}
+
+// The line table has an entry for every statement (/X, /E: the current ERL
+// value, 0 before the first numbered line) or for every numbered line (/D). A
+// line number starts at the lowest address that carries it.
+void Emitter::setupLineNumbers() {
+    std::map<uint16_t, std::pair<uint16_t, size_t>> first; // line -> (address, table index)
+    const auto& table = program_.prog().lineTable;
+    for (size_t i = 0; i < table.size(); ++i) {
+        uint16_t addr = table[i].first, ln = table[i].second;
+        if (ln == 0) continue;
+        auto it = first.find(ln);
+        if (it == first.end() || addr < it->second.first) first[ln] = {addr, i};
+    }
+    std::map<uint16_t, std::vector<std::pair<size_t, uint16_t>>> byAddr;
+    for (const auto& kv : first) byAddr[kv.second.first].push_back({kv.second.second, kv.first});
+    for (auto& kv : byAddr) {
+        std::sort(kv.second.begin(), kv.second.end());
+        for (const auto& e : kv.second) lineAt_[kv.first].push_back(e.second);
+    }
 }
 
 bool Emitter::isForwarder(const ProcView& v, int b) const {
@@ -159,6 +200,12 @@ bool Emitter::isForwarder(const ProcView& v, int b) const {
     if (bk.succs.empty()) return false;
     if (v.proc->gosubTargets.count(bk.start) || program_.dis().trapTargets().count(bk.start)) return false;
     if (bk.start == v.proc->entry) return false;
+    // A loop's closing jump that is also the exit of a loop test right before it
+    // ("jle body / jmp head" ending a FOR inside a WHILE) is the outer loop's latch.
+    if (bk.term == TermKind::Jump && int(bk.succs[0]) <= b && b > 0 && blk(v, b - 1).term == TermKind::Cond &&
+        blk(v, b - 1).succs.size() > 1 && int(blk(v, b - 1).succs[1]) == b &&
+        int(blk(v, b - 1).succs[0]) < b - 1)
+        return false;
     return true;
 }
 
@@ -222,18 +269,35 @@ void Emitter::jumpTo(ProcView& v, int from, int target, const Ctx& ctx, int ind)
     line(ind, jumpText(v, target, ctx));
 }
 
+std::vector<std::vector<uint16_t>> Emitter::blockLines(const ProcView& v, int b) const {
+    const Block& bk = blk(v, b);
+    const LiftedBlock& l = lb(v, b);
+    std::vector<std::vector<uint16_t>> res(l.stmts.size() + 1);
+    for (auto it = lineAt_.upper_bound(bk.start); it != lineAt_.end() && it->first < bk.end; ++it) {
+        // a statement's address is the last instruction of its code
+        size_t k = 0;
+        while (k < l.stmts.size() && l.stmts[k].addr < it->first) ++k;
+        res[k].insert(res[k].end(), it->second.begin(), it->second.end());
+    }
+    return res;
+}
+
 void Emitter::emitBody(ProcView& v, int b, const Ctx& ctx, int ind, size_t dropTail) {
     labelLine(addrOf(v, b));
     const LiftedBlock& l = lb(v, b);
+    std::vector<std::vector<uint16_t>> lines = blockLines(v, b);
     size_t n = l.stmts.size();
     if (b == ctx.dropLast && n > 0) --n;
     n = n >= dropTail ? n - dropTail : 0;
-    for (size_t k = 0; k < n; ++k) {
-        const Stmt& s = l.stmts[k];
-        std::string t = printer_.stmt(s);
+    for (size_t k = 0; k < l.stmts.size(); ++k) {
+        pendingLines_.insert(pendingLines_.end(), lines[k].begin(), lines[k].end());
+        if (k >= n) continue;
+        std::string t = printer_.stmt(l.stmts[k]);
         if (t.empty()) continue;
         line(ind, t);
     }
+    // line numbers of the terminator (IF, loop test ...) or of dropped statements
+    pendingLines_.insert(pendingLines_.end(), lines.back().begin(), lines.back().end());
 }
 
 void Emitter::emitTerm(ProcView& v, int b, const Ctx& ctx, int ind) {
@@ -370,6 +434,203 @@ bool Emitter::tryIf(ProcView& v, int i, const Ctx& ctx, int ind, int& next) {
     }
     line(ind, "END IF");
     next = E >= 0 ? E : other;
+    return true;
+}
+
+// SELECT CASE. The selector is copied to a hidden temporary T at the end of
+// block i, then every clause is a run of tests followed by its body:
+//
+//     cmp T,v1 / jcc next / jmp body       one test per item; the last item
+//     cmp T,v2 / jcc body / jmp nextClause jumps to the next clause instead
+//     body ... / jmp end
+//
+// A range "a TO b" is "T >= a" (else the next item) followed by "T <= b".
+// Without CASE ELSE the compiler adds "ERROR 39" (CASE ELSE expected) as the
+// else part.
+bool Emitter::trySelect(ProcView& v, int i, const Ctx& ctx, int ind, int& next) {
+    if (term(v, i) != TermKind::Cond || !lb(v, i).cond || lb(v, i).stmts.empty()) return false;
+    const Stmt& assign = lb(v, i).stmts.back();
+    if (assign.kind != SK::Assign || !assign.lhs || assign.lhs->kind != EK::Var || !assign.rhs) return false;
+    const uint16_t tv = assign.lhs->addr;
+    const Ty tt = assign.lhs->type;
+    auto isT = [&](const ExprPtr& e) {
+        ExprPtr s = stripConv(e);
+        return s && s->kind == EK::Var && s->addr == tv;
+    };
+    int tRefs = 0;
+    auto countT = [&](const ExprPtr& e) {
+        walkExpr(e, [&](const ExprPtr& x) {
+            if (x->kind == EK::Var && x->addr == tv) ++tRefs;
+        });
+    };
+    // "T op value" with T on the left
+    auto parseTest = [&](const ExprPtr& c, Op& op, ExprPtr& val) {
+        if (!c || c->kind != EK::Binary || !isCompare(c->op)) return false;
+        bool l = isT(c->args[0]), r = isT(c->args[1]);
+        if (l == r) return false;
+        op = l ? c->op : swapCompare(c->op);
+        val = l ? c->args[1] : c->args[0];
+        bool refs = false;
+        walkExpr(val, [&](const ExprPtr& x) {
+            if (x->kind == EK::Var && x->addr == tv) refs = true;
+        });
+        return !refs;
+    };
+    auto isTest = [&](int b) {
+        if (b < 0 || b >= v.n || !v.live[size_t(b)] || term(v, b) != TermKind::Cond || !lb(v, b).cond) return false;
+        if (b != i && !lb(v, b).stmts.empty()) return false;
+        const auto& s = v.succ[size_t(b)];
+        if (s.size() < 2 || s[0] == s[1] || blk(v, b).succs.empty()) return false;
+        Op op;
+        ExprPtr val;
+        return parseTest(lb(v, b).cond, op, val);
+    };
+    auto testTo = [&](int b, int target, Op& op, ExprPtr& val) { return parseTest(condTo(v, b, target), op, val); };
+    auto valText = [&](const ExprPtr& e) { return printer_.expr(e, tt); };
+    if (!isTest(i)) return false;
+
+    // the block a test's "jmp" goes to (one forwarder followed, raw index)
+    auto rawJmp = [&](int c) {
+        int j = int(blk(v, c).succs.size() > 1 ? blk(v, c).succs[1] : blk(v, c).succs[0]);
+        if (j >= 0 && j < v.n && !v.live[size_t(j)] && !blk(v, j).succs.empty()) j = int(blk(v, j).succs[0]);
+        return j;
+    };
+    // Items of a clause with tests C that go to M (resolved) on a match and to F
+    // (resolved) when nothing matches.
+    auto decode = [&](const std::vector<int>& C, int M, int F, std::string& items) {
+        items.clear();
+        auto edges = [&](int c, int a, int b) {
+            const auto& s = v.succ[size_t(c)];
+            return (s[0] == a && s[1] == b) || (s[0] == b && s[1] == a);
+        };
+        for (size_t j = 0; j < C.size();) {
+            int c = C[j];
+            int nxt = j + 1 < C.size() ? C[j + 1] : F;
+            Op op, op2;
+            ExprPtr val, val2;
+            if (!items.empty()) items += ", ";
+            if (edges(c, M, nxt)) {
+                if (!testTo(c, M, op, val)) return false;
+                items += op == Op::Eq ? valText(val) : std::string("IS ") + opText(op) + " " + valText(val);
+                ++j;
+                continue;
+            }
+            // range: T >= a goes on to T <= b; failing either goes to the next item
+            if (j + 1 >= C.size()) return false;
+            int c2 = C[j + 1];
+            int fail = j + 2 < C.size() ? C[j + 2] : F;
+            if (!edges(c, c2, fail) || !edges(c2, M, fail)) return false;
+            if (!testTo(c, c2, op, val) || op != Op::Ge || !testTo(c2, M, op2, val2) || op2 != Op::Le) return false;
+            items += valText(val) + " TO " + valText(val2);
+            j += 2;
+        }
+        return true;
+    };
+
+    struct Clause {
+        std::string items;
+        int body = -1;     // first block (may be a forwarder); -1: empty
+        int bodyEnd = -1;  // next clause / else part
+    };
+    std::vector<Clause> clauses;
+    std::vector<int> tests;
+    int end = -1;             // raw block the bodies jump to
+    bool endFromBody = false; // an empty body could be a GOTO; a real body confirms the end
+    auto setEnd = [&](int e, bool fromBody) {
+        if (end >= 0 && end != e) return false;
+        end = e;
+        endFromBody = endFromBody || fromBody;
+        return true;
+    };
+    int c0 = i;
+    for (int guard = 0; isTest(c0) && guard < 1000 && (end < 0 || c0 < end); ++guard) {
+        // the run of tests: each test falls ("jcc" over the "jmp") into the next one
+        std::vector<int> run{c0};
+        for (;;) {
+            int t = int(blk(v, run.back()).succs[0]);
+            if (t <= run.back() || !isTest(t)) break;
+            run.push_back(t);
+        }
+        Clause cl;
+        size_t used = 0;
+        // the body follows the tests
+        int body = int(blk(v, run.back()).succs[0]);
+        int bodyRes = resolve(v, body);
+        int fail = v.succ[size_t(run.back())][1];
+        if (body > run.back() && bodyRes < fail && fail > run.back() && decode(run, bodyRes, fail, cl.items)) {
+            cl.body = body;
+            cl.bodyEnd = fail;
+            used = run.size();
+            int last = prevLive(v, fail);
+            if (last >= bodyRes && term(v, last) == TermKind::Jump && !lb(v, last).noJump &&
+                !lb(v, last).returnWithTarget && !blk(v, last).succs.empty() && int(blk(v, last).succs[0]) > fail &&
+                !setEnd(int(blk(v, last).succs[0]), true))
+                return false;
+        } else {
+            // empty body: the matching tests jump straight to the end
+            for (size_t k = 0; k < run.size() && !used; ++k) {
+                int c = run[k];
+                int f = resolve(v, int(blk(v, c).succs[0]));
+                int m = v.succ[size_t(c)][0] == f ? v.succ[size_t(c)][1] : v.succ[size_t(c)][0];
+                std::vector<int> part(run.begin(), run.begin() + long(k) + 1);
+                if (m <= run.back() || !decode(part, m, f, cl.items)) continue;
+                if (!setEnd(rawJmp(c), false)) return false;
+                cl.bodyEnd = f;
+                used = k + 1;
+            }
+            if (!used) return false;
+        }
+        for (size_t k = 0; k < used; ++k) {
+            countT(lb(v, run[k]).cond);
+            tests.push_back(run[k]);
+        }
+        clauses.push_back(cl);
+        c0 = cl.bodyEnd;
+    }
+    if (clauses.empty() || end < 0 || c0 > end) return false;
+    const int endRes = resolve(v, end);
+    if (end > ctx.hi || (firstLive(v, end) >= ctx.hi && endRes != ctx.follow && firstLive(v, end) != ctx.hi))
+        return false;
+    if (!endFromBody && (c0 >= end || term(v, prevLive(v, end)) != TermKind::Fall)) return false;
+    // T is only used by the tests, which are only reached from the SELECT
+    if (pinfo_.varRefs[tv] != tRefs + 1) return false;
+    for (int t : tests) {
+        if (t == i) continue;
+        for (int p : v.preds[size_t(t)])
+            if (std::find(tests.begin(), tests.end(), p) == tests.end()) return false;
+    }
+    // else part: "ERROR 39" alone means there is no CASE ELSE
+    int elseStart = firstLive(v, c0) < end ? c0 : -1;
+    if (elseStart >= 0) {
+        int e = firstLive(v, elseStart);
+        const LiftedBlock& el = lb(v, e);
+        if (firstLive(v, nextLive(v, e)) >= end && el.stmts.size() == 1 && term(v, e) == TermKind::Fall &&
+            printer_.stmt(el.stmts[0]) == "ERROR 39" && v.preds[size_t(e)].size() == 1)
+            elseStart = -1;
+    }
+
+    emitBody(v, i, ctx, ind, 1);
+    line(ind, "SELECT CASE " + printer_.expr(assign.rhs, tt));
+    for (const Clause& cl : clauses) {
+        line(ind + 1, "CASE " + cl.items);
+        Ctx c = ctx;
+        c.hi = cl.bodyEnd;
+        c.follow = endRes;
+        c.skipTerm = -1;
+        c.dropLast = -1;
+        if (cl.body >= 0 && resolve(v, cl.body) < cl.bodyEnd) region(v, cl.body, c, ind + 2);
+    }
+    if (elseStart >= 0) {
+        line(ind + 1, "CASE ELSE");
+        Ctx c = ctx;
+        c.hi = end;
+        c.follow = endRes;
+        c.skipTerm = -1;
+        c.dropLast = -1;
+        region(v, elseStart, c, ind + 2);
+    }
+    line(ind, "END SELECT");
+    next = end;
     return true;
 }
 
@@ -606,6 +867,10 @@ void Emitter::region(ProcView& v, int lo, const Ctx& ctx, int ind) {
             i = next;
             continue;
         }
+        if (i != ctx.skipTerm && trySelect(v, i, ctx, ind, next)) {
+            i = next;
+            continue;
+        }
         emitBody(v, i, ctx, ind);
         if (i == ctx.skipTerm) {
             i = nextLive(v, i);
@@ -778,17 +1043,43 @@ std::string Emitter::run(const DecompileOptions& opt, const std::string& inputNa
     }
 
     std::string text;
+    // A line number goes in front of the next statement. Ones that can't (several
+    // at the same place, before a label or a blank line) get a line of their own.
+    std::set<uint16_t> doneLines;
+    std::vector<uint16_t> pend;
+    auto flushBare = [&]() {
+        for (uint16_t n : pend) text += std::to_string(n) + "\n";
+        pend.clear();
+    };
     auto emitLines = [&](const std::vector<OutLine>& ls) {
         for (const OutLine& l : ls) {
+            for (uint16_t n : l.lineNos)
+                if (doneLines.insert(n).second) pend.push_back(n);
+            if (l.label == -2) continue;
             if (l.label >= 0) {
-                if (refLabels_.count(uint16_t(l.label))) text += "loc" + hex4(uint16_t(l.label)) + ":\n";
+                if (l.lineNos.empty() && refLabels_.count(uint16_t(l.label))) {
+                    flushBare();
+                    text += "loc" + hex4(uint16_t(l.label)) + ":\n";
+                }
                 continue;
             }
+            if (l.text.empty()) {
+                flushBare();
+                text += "\n";
+                continue;
+            }
+            std::string prefix;
+            if (!pend.empty()) {
+                prefix = std::to_string(pend.back()) + " ";
+                pend.pop_back();
+                flushBare();
+            }
             std::string s(size_t(l.indent) * 2, ' ');
-            s += l.text;
+            s += prefix + l.text;
             if (s.size() > 250) warnings_.push_back("line longer than 250 characters: " + s.substr(0, 60) + "...");
             text += s + "\n";
         }
+        flushBare();
     };
     emitLines(header);
     emitLines(fnLines);

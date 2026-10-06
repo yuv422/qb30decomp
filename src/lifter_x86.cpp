@@ -51,8 +51,10 @@ ExprPtr Lifter::Impl::memLocation(const ZydisDecodedOperand& op, Ty t) {
     return mkArrElem(uint16_t(disp), t, {r}, AF_ByteOffset);
 }
 
-// Index of the SUB parameter whose pointer lives at [bp+off].
-static int paramIndexFor(const Proc* p, const GlobalInfo& info, int off) {
+// Parameter index for a [bp+off] frame location. For an array descriptor
+// parameter, *within receives the byte offset inside the descriptor.
+static int paramIndexFor(const Proc* p, const GlobalInfo& info, int off, int* within = nullptr) {
+    if (within) *within = 0;
     if (!p || p->kind != ProcKind::Sub || off < 6 || p->retfBytes <= 0) return -1;
     auto it = info.subs.find(p->entry);
     // walk from the last parameter (at bp+6) upwards
@@ -61,7 +63,10 @@ static int paramIndexFor(const Proc* p, const GlobalInfo& info, int off) {
         int pos = 6;
         for (int k = int(ps.size()) - 1; k >= 0; --k) {
             int size = ps[k].isArray ? (4 + ps[k].dims) * 2 : 2;
-            if (off >= pos && off < pos + size) return k;
+            if (off >= pos && off < pos + size) {
+                if (within) *within = off - pos;
+                return k;
+            }
             pos += size;
         }
         return -1;
@@ -91,7 +96,15 @@ ExprPtr Lifter::Impl::operandValue(const Insn& in, int i) {
             int off = op.mem.disp.has_displacement ? int(int16_t(op.mem.disp.value)) : 0;
             auto it = st.frame.find(off);
             if (it != st.frame.end() && it->second.e) return it->second.e;
-            int k = paramIndexFor(proc, info, off);
+            int within = 0;
+            int k = paramIndexFor(proc, info, off, &within);
+            if (k >= 0 && within >= 8) {
+                // dimension size word of an array descriptor parameter
+                auto e = std::make_shared<Expr>(*mkRaw("@pdim", Ty::Int));
+                e->ival = k;
+                e->addr = uint16_t((within - 8) / 2);
+                return e;
+            }
             if (k >= 0) return mkParam(k, Ty::Unknown);
             return mkUnknown("frame read");
         }
@@ -301,7 +314,7 @@ void Lifter::Impl::callSub(uint16_t target, const std::string& name, bool extern
         st.stack.pop_back();
     }
     // raw[0] is the last argument. Recognise array descriptors pushed on the stack.
-    struct Arg { ExprPtr ptr; bool isArray = false; int dims = 0; int type = 0; };
+    struct Arg { ExprPtr ptr; bool isArray = false; bool dynamic = false; int dims = 0; int type = 0; };
     std::vector<Arg> args;
     for (size_t i = 0; i < raw.size();) {
         Arg a;
@@ -314,6 +327,20 @@ void Lifter::Impl::callSub(uint16_t target, const std::string& name, bool extern
             a.type = tw & 0x7f;
             size_t n = size_t(4 + a.dims);
             i += std::min(n, raw.size() - i);
+        } else if (raw[i] && raw[i]->kind == EK::Raw && raw[i]->sval == "@descword" && raw[i]->ival == 0) {
+            // $DYNAMIC array: its descriptor was copied onto the stack
+            uint16_t desc = raw[i]->addr;
+            a.ptr = mkInt(desc);
+            a.isArray = true;
+            a.dynamic = true;
+            a.dims = info.dynDims.count(desc) ? info.dynDims[desc] : 1;
+            Ty t = info.dynArrays.count(desc) ? info.dynArrays[desc] : Ty::Unknown;
+            a.type = t == Ty::Int ? 1 : t == Ty::Sng ? 2 : t == Ty::Dbl ? 3 : t == Ty::Str ? 4 : 0;
+            size_t n = 0;
+            while (i + n < raw.size() && raw[i + n] && raw[i + n]->kind == EK::Raw && raw[i + n]->sval == "@descword" &&
+                   raw[i + n]->addr == desc)
+                ++n;
+            i += n;
         } else {
             ++i;
         }
@@ -342,6 +369,7 @@ void Lifter::Impl::callSub(uint16_t target, const std::string& name, bool extern
             auto e = std::make_shared<Expr>(*argExprs.back());
             e->addr = uint16_t(addr);
             e->ival = a.dims;
+            if (a.dynamic) e->flags |= AF_Dynamic;
             argExprs.back() = e;
         } else {
             Ty t = Ty::Unknown;
@@ -396,6 +424,7 @@ void Lifter::Impl::execX86(const Insn& in) {
         return;
     case ZYDIS_MNEMONIC_INT3:
     case ZYDIS_MNEMONIC_CLD:
+    case ZYDIS_MNEMONIC_INTO: // overflow check (/D)
     case ZYDIS_MNEMONIC_STD:
         return;
     case ZYDIS_MNEMONIC_MOV: {
@@ -553,6 +582,35 @@ void Lifter::Impl::execX86(const Insn& in) {
         writeOperand(in, 0, r, nullptr);
         st.flags.kind = Flags::Test;
         st.flags.a = r;
+        return;
+    }
+    case ZYDIS_MNEMONIC_SAR: {
+        // only "sar cx,1" (descriptor size in words, see MOVSW)
+        int32_t v;
+        int n = in.ops[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE ? int(in.ops[1].imm.value.u) : -1;
+        ExprPtr x = operandValue(in, 0);
+        writeOperand(in, 0, n >= 0 && isIntLit(x, &v) ? mkInt(int16_t(v) >> n) : mkUnknown("sar"), nullptr);
+        st.flags = Flags();
+        return;
+    }
+    case ZYDIS_MNEMONIC_MOVSW: {
+        // "rep movsw" copies a $DYNAMIC array descriptor onto the stack for CALL
+        int32_t desc;
+        auto dit = isIntLit(reg(SI), &desc) ? info.dynDims.find(uint16_t(desc)) : info.dynDims.end();
+        if ((z.attributes & ZYDIS_ATTRIB_HAS_REP) && dit != info.dynDims.end()) {
+            int words = 4 + dit->second;
+            for (int w = words - 1; w >= 0; --w) {
+                auto e = std::make_shared<Expr>(*mkRaw("@descword", Ty::Int));
+                e->addr = uint16_t(desc);
+                e->ival = w;
+                st.stack.push_back(Val{e, nullptr});
+            }
+        } else {
+            warn("unhandled string move");
+        }
+        setReg(SI, mkUnknown("si"));
+        setReg(DI, mkUnknown("di"));
+        setReg(CX, mkInt(0));
         return;
     }
     case ZYDIS_MNEMONIC_CMP:

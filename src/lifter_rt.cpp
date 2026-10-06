@@ -747,10 +747,12 @@ void Lifter::Impl::execRt(const Insn& in) {
                 idx[size_t(i)] = st.stack.back().e;
                 st.stack.pop_back();
             }
+            // the inline extents are stored last dimension first
             std::string name = "@index:";
             for (int i = 0; i < dims; ++i) {
                 if (i) name += ",";
-                name += std::to_string(rt.byteArg(size_t(2 + 2 * i)) | (rt.byteArg(size_t(3 + 2 * i)) << 8));
+                size_t k = size_t(dims - 1 - i);
+                name += std::to_string(rt.byteArg(2 + 2 * k) | (rt.byteArg(3 + 2 * k) << 8));
             }
             auto e = std::make_shared<Expr>(*mkFunc(name, idx, Ty::Int));
             e->ival = rt.byteArg(0);

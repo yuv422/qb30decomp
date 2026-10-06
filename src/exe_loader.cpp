@@ -33,6 +33,16 @@ void parseDataBlock(const std::vector<uint8_t>& b, size_t off, size_t end, Loade
     }
 }
 
+// Parses the line number table: (word address, word line)* ended by address 0.
+void parseLineTable(const std::vector<uint8_t>& b, size_t off, size_t end, LoadedProgram& prog) {
+    while (off + 4 <= end) {
+        uint16_t addr = rd16(b, off);
+        if (addr == 0) break;
+        prog.lineTable.emplace_back(addr, rd16(b, off + 2));
+        off += 4;
+    }
+}
+
 void setDs(LoadedProgram& prog, uint16_t addr, uint8_t v) {
     prog.ds[addr] = v;
     prog.dsInit[addr] = true;
@@ -62,6 +72,9 @@ void loadBz(const std::vector<uint8_t>& file, size_t loadStart, LoadedProgram& p
         }
         case 0x18: // DATA statements
             parseDataBlock(file, data, end, prog);
+            break;
+        case 0x1a: // line number table
+            parseLineTable(file, data, end, prog);
             break;
         case 0x19: { // initialised data chunks: word size (incl. header), word address, bytes
             size_t p = data;
@@ -95,6 +108,9 @@ void loadBm(const std::vector<uint8_t>& file, size_t loadStart, LoadedProgram& p
     prog.code.assign(f.begin() + long(loadStart), f.begin() + long(loadStart + codeLen));
     prog.codeEnd = uint16_t(codeLen);
     prog.dsEnd = rd16(f, loadStart + 0x10);
+    // the line number table follows the code (header word +0x0A, 0 if there is none)
+    uint16_t lineTab = rd16(f, loadStart + 0x0a);
+    if (lineTab >= 0x30 && lineTab < codeLen) parseLineTable(f, loadStart + lineTab, loadStart + codeLen, prog);
 
     // Initialised data is copied to DS:initDs. The DATA statement block follows the
     // literals; the header word at +0x0C points just past its first key.

@@ -3,6 +3,7 @@
 
 #include "lifter.h"
 #include "mbf.h"
+#include "simplify.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -220,6 +221,24 @@ struct Lifter::Impl {
             break;
         case EK::Binary:
             if (p->op == Op::Add) {
+                // dynamic string array: [descriptor] + offset (the constant part of
+                // the offset may have been folded to the top of the sum)
+                Linear l = toLinear(p);
+                for (size_t k = 0; k < l.terms.size(); ++k) {
+                    const ExprPtr& d = l.terms[k].first;
+                    if (l.terms[k].second == 1 && d->kind == EK::Var && d->type == Ty::Int &&
+                        info.dynArrays.count(d->addr)) {
+                        Linear rest = l;
+                        rest.terms.erase(rest.terms.begin() + long(k));
+                        return mkArrElem(d->addr, t, {fromLinear(rest)}, AF_ByteOffset | AF_Dynamic);
+                    }
+                    // string array parameter: [descriptor on the stack] + offset
+                    if (l.terms[k].second == 1 && d->kind == EK::Param && d->flags == 0 && isArrayParam(d->ival)) {
+                        Linear rest = l;
+                        rest.terms.erase(rest.terms.begin() + long(k));
+                        return mkArrElem(0, t, {fromLinear(rest)}, AF_ByteOffset | AF_Dynamic | AF_Param, d->ival);
+                    }
+                }
                 int32_t base;
                 ExprPtr off;
                 if (isIntLit(p->args[1], &base)) off = p->args[0];
@@ -279,6 +298,21 @@ struct Lifter::Impl {
         auto it = info.arrayExtent.find(base);
         return it == info.arrayExtent.end() ? 0 : it->second;
     }
+    bool isArrayParam(int k) const {
+        if (!proc || proc->kind != ProcKind::Sub) return false;
+        auto it = info.subs.find(proc->entry);
+        return it != info.subs.end() && k >= 0 && k < int(it->second.params.size()) && it->second.params[size_t(k)].isArray;
+    }
+    // Bytes a static array element with this base may touch. Constant subscripts
+    // are folded into the base, so it can point into the middle of the array.
+    std::pair<uint32_t, uint32_t> arrayRange(uint16_t base) const {
+        auto it = info.arrayExtent.upper_bound(base);
+        if (it != info.arrayExtent.begin()) {
+            --it;
+            if (base < it->first + it->second) return {it->first, it->first + it->second};
+        }
+        return {base, base + 256u}; // not known yet
+    }
     // A variable only used by the current procedure (known after the first pass).
     bool isLocalVar(uint16_t a) const {
         if (pass == 1) return false;
@@ -313,9 +347,8 @@ struct Lifter::Impl {
             }
             case EK::ArrElem:
                 if (!(n->flags & (AF_Dynamic | AF_Param))) {
-                    uint32_t ext = arrayExtent(n->addr);
-                    if (ext == 0) ext = 256;
-                    if (addr + size > n->addr && addr < n->addr + ext) hit = true;
+                    auto r = arrayRange(n->addr);
+                    if (addr + size > r.first && addr < r.second) hit = true;
                 }
                 break;
             case EK::Param:
@@ -333,13 +366,17 @@ struct Lifter::Impl {
     // Does e read an element of the array at `base` (static data address or descriptor)?
     bool readsArray(const ExprPtr& e, uint16_t base, bool dynamic) const {
         bool hit = false;
-        uint32_t ext = dynamic ? 0 : arrayExtent(base);
-        if (!dynamic && ext == 0) ext = 256;
+        auto r = arrayRange(base);
+        auto overlaps = [&](uint16_t b2) {
+            auto r2 = arrayRange(b2);
+            return r2.first < r.second && r.first < r2.second;
+        };
         walkExpr(e, [&](const ExprPtr& n) {
             if (hit) return;
-            if (n->kind == EK::ArrElem && n->addr == base && bool(n->flags & AF_Dynamic) == dynamic) hit = true;
-            else if (n->kind == EK::ArrElem && (n->flags & AF_Param)) hit = true;
-            else if (n->kind == EK::Var && !dynamic && n->addr >= base && n->addr < base + ext) hit = true;
+            if (n->kind == EK::ArrElem && (n->flags & AF_Param)) hit = true;
+            else if (n->kind == EK::ArrElem && dynamic && (n->flags & AF_Dynamic) && n->addr == base) hit = true;
+            else if (n->kind == EK::ArrElem && !dynamic && !(n->flags & AF_Dynamic) && overlaps(n->addr)) hit = true;
+            else if (n->kind == EK::Var && !dynamic && n->addr >= r.first && n->addr < r.second) hit = true;
             else if (n->kind == EK::Param && n->type != Ty::Unknown) hit = true;
             else if (n->kind == EK::FnCall) hit = true;
         });

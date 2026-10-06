@@ -31,7 +31,9 @@ blocks), `--info`, `--no-comments`, `-v` (show warnings).
 The output uses CRLF line endings (QB 3.0 misparses LF only files).
 Variables are named `variXXXX` after their DS address with a type suffix
 (`%`, `#`, `$`, none for single). Labels are `locXXXX`, SUBs `subXXXX`,
-DEF FN functions `FNfXXXX`. A `' QBOPTS:` comment lists the compiler
+DEF FN functions `FNfXXXX`. Programs compiled with /X, /E or /D carry a line
+number table; their line numbers are restored (so ERL and TRON give the same
+results) and used as label names. A `' QBOPTS:` comment lists the compiler
 switches the program needs (/E /X /W /D).
 
 ## How it works
@@ -49,8 +51,9 @@ switches the program needs (/E /X /W /D).
    types and array information.
 5. `postprocess` recovers array dimensions, variable types and inlines
    compiler temporaries.
-6. `emitter` structures the CFG (IF/ELSEIF/ELSE, FOR/NEXT incl. variable STEP,
-   DO WHILE / LOOP WHILE / EXIT, GOTO fallback) and prints the program.
+6. `emitter` structures the CFG (IF/ELSEIF/ELSE, SELECT CASE, FOR/NEXT incl.
+   variable STEP, DO WHILE / LOOP WHILE / EXIT, GOTO fallback) and prints the
+   program.
 
 ## Tests
 
@@ -59,15 +62,17 @@ with QB 3.0 in DOSBox Staging (`tools/qbcompile.sh`), decompiles, recompiles
 the output and checks the result is a fixpoint. `tests/roundtrip_exe.sh` does
 the same for existing executables.
 
-Status: 27 of 29 tests pass; 155 of the sample executables in the
-quickbasic-3-disassembly repository round trip.
+Status: all 33 tests pass; 156 of the 158 sample executables in the
+quickbasic-3-disassembly repository round trip (CINT.EXE contains a patched
+opcode, SUB1F1D.EXE writes past an undeclared array).
 
 ## Known limitations / TODO
 
-- `$DYNAMIC` arrays passed to SUBs (descriptor copied with `REP MOVSW`) and
-  multi-dimensional array parameters are not decoded (DYN3 test).
-- `/D` builds: TRON/TROFF are only emitted when /D is detected (DEBUG test
-  still differs).
-- SELECT CASE comes out as IF/ELSE chains; static arrays only used with
-  constant indices become scalars; line numbers (for ERL) are not restored.
+- Static arrays only used with constant indices become scalars (same
+  behaviour, different memory layout).
+- WHILE ... WEND comes out as the equivalent DO WHILE ... LOOP; a SELECT CASE
+  that has nothing but CASE ELSE comes out as an assignment to its hidden
+  temporary followed by the CASE ELSE statements.
+- Line numbers of programs compiled without /X, /E or /D are not stored in the
+  executable; GOTO targets become `locXXXX` labels.
 - Programs compiled with /O (BCOM30.LIB) are not supported.

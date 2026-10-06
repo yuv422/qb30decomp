@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 
 namespace qb {
 
@@ -132,7 +133,8 @@ bool isDescWord(uint16_t addr, uint16_t desc, int dims) {
 
 // Indices of a dynamic array element from its byte offset. Multi dimensional
 // offsets use the dimension sizes stored in the descriptor.
-std::vector<ExprPtr> decomposeDyn(const ExprPtr& byteOff, int size, uint16_t desc, int dims) {
+std::vector<ExprPtr> decomposeDyn(const ExprPtr& byteOff, int size, int dims,
+                                  const std::function<bool(const ExprPtr&)>& isDim) {
     Linear l0 = toLinear(byteOff);
     Linear l;
     for (const auto& t : l0.terms) l.add(t.first, size ? t.second / size : t.second);
@@ -147,20 +149,20 @@ std::vector<ExprPtr> decomposeDyn(const ExprPtr& byteOff, int size, uint16_t des
         Linear here, rest;
         for (const auto& t : cur.terms) {
             const ExprPtr& a = t.first;
-            if (a->kind == EK::Var && isDescWord(a->addr, desc, dims)) {
+            if (isDim(a)) {
                 rest.constant += t.second;
                 continue;
             }
             if (a->kind == EK::Binary && a->op == Op::Mul) {
                 const ExprPtr& x = a->args[0];
                 const ExprPtr& y = a->args[1];
-                if (y->kind == EK::Var && isDescWord(y->addr, desc, dims)) {
+                if (isDim(y)) {
                     Linear inner = toLinear(x);
                     for (const auto& it : inner.terms) rest.add(it.first, it.second * t.second);
                     rest.constant += inner.constant * t.second;
                     continue;
                 }
-                if (x->kind == EK::Var && isDescWord(x->addr, desc, dims)) {
+                if (isDim(x)) {
                     Linear inner = toLinear(y);
                     for (const auto& it : inner.terms) rest.add(it.first, it.second * t.second);
                     rest.constant += inner.constant * t.second;
@@ -383,7 +385,7 @@ ProgramInfo postprocess(Program& program, std::vector<std::vector<LiftedBlock>>&
                 if (t != Ty::Unknown) return t;
         return Ty::Sng;
     };
-    forEachExprSlot(results, info, [&](ExprPtr& e, uint32_t) {
+    forEachExprSlot(results, info, [&](ExprPtr& e, uint32_t pi) {
         e = rewriteExpr(e, [&](const ExprPtr& n) -> ExprPtr {
             if (n->kind == EK::ArrElem && (n->flags & AF_ByteOffset)) {
                 if (!(n->flags & (AF_Dynamic | AF_Param))) {
@@ -413,8 +415,20 @@ ProgramInfo postprocess(Program& program, std::vector<std::vector<LiftedBlock>>&
                     int size = tySize(n->type);
                     std::vector<ExprPtr> idx;
                     const ExprPtr& off = n->args[0];
-                    if (off->kind == EK::Func && off->sval.rfind("@index", 0) == 0) idx = off->args;
-                    else idx = decompose(toLinear(off), size ? size : 2, {1 << 30});
+                    if (off->kind == EK::Func && off->sval.rfind("@index", 0) == 0) {
+                        idx = off->args;
+                    } else {
+                        // dimension sizes come from the descriptor on the stack ("@pdim")
+                        int dims = 1;
+                        auto sit = info.subs.find(program.procs()[pi].entry);
+                        if (sit != info.subs.end() && n->ival >= 0 && n->ival < int(sit->second.params.size()))
+                            dims = std::max(1, sit->second.params[size_t(n->ival)].dims);
+                        int k = n->ival;
+                        idx = decomposeDyn(off, size ? size : 2, dims, [k](const ExprPtr& a) {
+                            return a->kind == EK::Raw && a->sval == "@pdim" && a->ival == k;
+                        });
+                    }
+                    for (auto& x : idx) x = simplifyExpr(x);
                     return mkArrElem(0, n->type, idx, AF_Param | AF_Dynamic, n->ival);
                 }
                 // dynamic
@@ -428,7 +442,12 @@ ProgramInfo postprocess(Program& program, std::vector<std::vector<LiftedBlock>>&
                 const ExprPtr& off = n->args[0];
                 std::vector<ExprPtr> idx;
                 if (off->kind == EK::Func && off->sval.rfind("@index", 0) == 0) idx = off->args;
-                else idx = decomposeDyn(off, tySize(t), n->addr, dims);
+                else {
+                    uint16_t desc = n->addr;
+                    idx = decomposeDyn(off, tySize(t), dims, [desc, dims](const ExprPtr& a) {
+                        return a->kind == EK::Var && isDescWord(a->addr, desc, dims);
+                    });
+                }
                 for (auto& x : idx) x = simplifyExpr(x);
                 return mkArrElem(n->addr, t, idx, AF_Dynamic);
             }

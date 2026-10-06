@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace qb {
@@ -42,6 +43,9 @@ struct LoadedProgram {
     uint16_t dsEnd = 0;
 
     std::vector<DataLine> dataLines;
+    // ERL / TRON line table (/X, /E, /D): (code address, line number) pairs in
+    // table order. Line 0 marks statements without a line number.
+    std::vector<std::pair<uint16_t, uint16_t>> lineTable;
 
     bool debugBuild() const { return (flags2 & 0x01) != 0; }
     bool eventTrapping() const { return (flags & 0x08) != 0; }

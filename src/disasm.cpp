@@ -38,7 +38,7 @@ bool Insn::farCallTarget(uint16_t& target) const {
     // SUBs of a linked ("bm") program live in the program's own code segment,
     // which is the first segment of the load module (segment 0 before relocation).
     if (op.ptr.segment != 0) return false;
-    target = op.ptr.offset;
+    target = uint16_t(op.ptr.offset);
     return true;
 }
 
