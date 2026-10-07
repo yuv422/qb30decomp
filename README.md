@@ -52,9 +52,10 @@ The output keeps the program's memory layout where it can:
   is reserved too.
 
 QB 3.0 accepts lines of at most 252 characters, and the `variXXXX` names make
-expressions much longer than in the original. Long ON GOTO/GOSUB, INPUT # and
-PRINT lists are split into several statements. Parts of long expressions are
-moved into temporaries named `tmpN` with a type suffix.
+expressions much longer than in the original. A longer statement is continued
+on the next line with ` _` (QB allows this wherever a space may be, but not in
+a string). DATA can't be continued, so a long DATA line becomes several DATA
+statements.
 
 ## How it works
 
@@ -104,3 +105,7 @@ opcode, SUB1F1D.EXE writes past an undeclared array).
   unreachable code, and only writes a line number table with /E or /X. A
   second decompile of such a program can therefore differ (adjacent arrays may
   merge into one), although it behaves the same.
+- The compiler reorders the terms of long sums. The order the decompiler prints
+  (the order the code evaluates them in) is not always reproduced when the
+  output is compiled again, which can change the last bit of a floating point
+  result (LONGLINE test).

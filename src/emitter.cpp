@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <set>
@@ -20,24 +21,15 @@ std::string hex4(uint16_t v) {
     return buf;
 }
 
-// The longest line QB 3.0 accepts.
+// The longest line QB 3.0 accepts. Longer statements are continued on the next
+// line with "_" (which QB allows wherever a space may be).
 constexpr int kMaxLine = 252;
-
-// Where an output line came from: statement k of block b (k == -1: the block's
-// condition), so that a line that is too long can be shortened.
-struct LineSrc {
-    int pi = -1;
-    int b = -1;
-    int k = -1;
-    bool valid() const { return pi >= 0 && b >= 0; }
-};
 
 struct OutLine {
     int indent = 0;
     std::string text;
     int label = -1;   // label definition for this code address (emitted only when referenced)
     std::vector<uint16_t> lineNos; // BASIC line numbers defined at this line
-    LineSrc src;
 };
 
 struct Ctx {
@@ -106,22 +98,11 @@ private:
     TermKind term(const ProcView& v, int b) const { return blk(v, b).term; }
 
     void line(int ind, const std::string& text) {
-        out_.push_back({ind, text, -1, pendingLines_, src_});
+        out_.push_back({ind, text, -1, pendingLines_});
         pendingLines_.clear();
-        src_ = LineSrc();
     }
-    // the next line prints the condition of block b
-    void condSrc(const ProcView& v, int b) { src_ = {int(v.pi), b, -1}; }
-    // long lines
-    std::string newTemp(Ty t);
-    bool hoist(std::vector<ExprPtr*> roots, const std::vector<bool>& rootOk, int excess, int budget, ExprPtr& tmp,
-               ExprPtr& value);
-    bool shortenLine(const OutLine& l);
     void placeDims(const std::vector<std::pair<uint16_t, std::string>>& dims, std::vector<OutLine>& fnLines,
                    std::vector<OutLine>& mainLines);
-    bool splitList(const Stmt& s, int ind);
-    void onTargets(const std::string& selector, const ExprPtr& sel, const std::vector<std::string>& labels,
-                   const char* kw, int ind);
     void labelLine(uint16_t addr) {
         // line numbers of code before the label stay in front of it
         if (!pendingLines_.empty()) out_.push_back({0, "", -2, pendingLines_});
@@ -168,9 +149,6 @@ private:
     std::map<uint16_t, uint16_t> labelCanon_; // address -> address of the live block that holds the label
     std::map<uint16_t, std::vector<uint16_t>> lineAt_; // code address -> line numbers starting there
     std::vector<uint16_t> pendingLines_;               // line numbers for the next output line
-    LineSrc src_;                                      // source of the next output line
-    int tempCount_ = 0;
-    std::map<uint16_t, std::vector<std::pair<ExprPtr, ExprPtr>>> fnTemps_; // DEF FN -> (temporary, value)
     const ProcView* cur_ = nullptr;
 };
 
@@ -326,8 +304,6 @@ void Emitter::emitBody(ProcView& v, int b, const Ctx& ctx, int ind, size_t dropT
         if (k >= n) continue;
         std::string t = printer_.stmt(l.stmts[k]);
         if (t.empty()) continue;
-        if (ind * 2 + int(t.size()) > kMaxLine - 6 && splitList(l.stmts[k], ind)) continue;
-        src_ = {int(v.pi), b, int(k)};
         line(ind, t);
     }
     // line numbers of the terminator (IF, loop test ...) or of dropped statements
@@ -361,13 +337,10 @@ void Emitter::emitTerm(ProcView& v, int b, const Ctx& ctx, int ind) {
         if (T == F) {
             jumpTo(v, b, T, ctx, ind);
         } else if (T == fallsTo) {
-            condSrc(v, b);
             line(ind, "IF " + printer_.cond(invertCond(l.cond)) + " THEN " + jumpText(v, F, ctx));
         } else if (F == fallsTo) {
-            condSrc(v, b);
             line(ind, "IF " + printer_.cond(l.cond) + " THEN " + jumpText(v, T, ctx));
         } else {
-            condSrc(v, b);
             line(ind, "IF " + printer_.cond(l.cond) + " THEN " + jumpText(v, T, ctx));
             jumpTo(v, b, F, ctx, ind);
         }
@@ -377,7 +350,9 @@ void Emitter::emitTerm(ProcView& v, int b, const Ctx& ctx, int ind) {
         std::string sel = printer_.expr(l.selector, Ty::Int);
         std::vector<std::string> labels;
         for (size_t k = 0; k + 1 < sc.size(); ++k) labels.push_back(names_.label(addrOf(v, sc[k])));
-        onTargets(sel, l.selector, labels, "GOTO", ind);
+        std::string s = "ON " + sel + " GOTO ";
+        for (size_t k = 0; k < labels.size(); ++k) s += (k ? ", " : "") + labels[k];
+        line(ind, s);
         if (!sc.empty()) jumpTo(v, b, sc.back(), ctx, ind);
         break;
     }
@@ -420,7 +395,6 @@ bool Emitter::tryIf(ProcView& v, int i, const Ctx& ctx, int ind, int& next) {
     };
 
     int E = elseEnd(n, other);
-    condSrc(v, i);
     line(ind, "IF " + printer_.cond(cond) + " THEN");
     int thenStart = n, thenEnd = other;
     for (;;) {
@@ -446,7 +420,6 @@ bool Emitter::tryIf(ProcView& v, int i, const Ctx& ctx, int ind, int& next) {
                 int e2 = other2 == E ? E : elseEnd(n2, other2);
                 if (e2 == E) {
                     labelLine(addrOf(v, f));
-                    condSrc(v, f);
                     line(ind, "ELSEIF " + printer_.cond(cond2) + " THEN");
                     thenStart = n2;
                     thenEnd = other2;
@@ -703,7 +676,6 @@ bool Emitter::tryLoop(ProcView& v, int i, const Ctx& ctx, int ind, int& next) {
         ExprPtr cont = condTo(v, latch, i);
         line(ind, "DO");
         region(v, i, body, ind + 1);
-        condSrc(v, latch);
         line(ind, "LOOP WHILE " + printer_.cond(cont));
         next = exitIdx;
         return true;
@@ -716,7 +688,6 @@ bool Emitter::tryLoop(ProcView& v, int i, const Ctx& ctx, int ind, int& next) {
             ((hs[0] == bodyStart && hs[1] == exitIdx) || (hs[1] == bodyStart && hs[0] == exitIdx)) && bodyStart <= latch) {
             ExprPtr c = condTo(v, i, bodyStart);
             labelLine(addrOf(v, i));
-            condSrc(v, i);
             line(ind, "DO WHILE " + printer_.cond(c));
             region(v, bodyStart, body, ind + 1);
             line(ind, "LOOP");
@@ -981,18 +952,8 @@ void Emitter::emitProc(uint32_t pi, int ind) {
             }
             s += ")";
         }
-        auto tt = fnTemps_.find(p.entry);
-        if (tt == fnTemps_.end()) {
-            s += " = " + printer_.expr(fi.body, fi.type);
-            line(ind, s);
-            return;
-        }
-        // too long for one line: assign parts to temporaries first
+        s += " = " + printer_.expr(fi.body, fi.type);
         line(ind, s);
-        for (const auto& a : tt->second)
-            line(ind + 1, printer_.expr(a.first) + " = " + printer_.expr(a.second, a.first->type));
-        line(ind + 1, names_.fn(p.entry) + " = " + printer_.expr(fi.body, fi.type));
-        line(ind, "END DEF");
         return;
     }
     Ctx ctx;
@@ -1031,259 +992,80 @@ void Emitter::emitProc(uint32_t pi, int ind) {
     cur_ = nullptr;
 }
 
-// ---------------------------------------------------------------------------
-// Lines longer than QB accepts. The variable names make expressions much longer
-// than in the original source: long lists are split into several statements,
-// parts of long expressions are moved into temporaries.
+namespace {
 
-std::string Emitter::newTemp(Ty t) {
-    const char* suffix = t == Ty::Int ? "%" : t == Ty::Dbl ? "#" : t == Ty::Str ? "$" : "!";
-    return "tmp" + std::to_string(++tempCount_) + suffix;
-}
-
-// "ON sel GOTO/GOSUB labels", split into chunks when the line is too long:
-//   t = sel / IF t <= 20 THEN ON t GOTO ... ELSEIF t <= 40 THEN ON t - 20 GOTO ... END IF
-void Emitter::onTargets(const std::string& selector, const ExprPtr& sel, const std::vector<std::string>& labels,
-                        const char* kw, int ind) {
-    std::string all = "ON " + selector + " " + kw + " ";
-    for (size_t k = 0; k < labels.size(); ++k) all += (k ? ", " : "") + labels[k];
-    if (ind * 2 + int(all.size()) <= kMaxLine - 6) {
-        line(ind, all);
-        return;
-    }
-    std::string t = selector;
-    ExprPtr s = stripConv(sel);
-    if (!s || s->kind != EK::Var || s->type != Ty::Int) {
-        t = newTemp(Ty::Int);
-        line(ind, t + " = " + selector);
-    }
-    size_t base = 0;
-    while (base < labels.size()) {
-        std::string head = "ON " + (base ? t + " - " + std::to_string(base) : t) + " " + kw + " ";
-        std::string body;
-        size_t n = 0;
-        while (base + n < labels.size()) {
-            std::string add = (n ? ", " : "") + labels[base + n];
-            if (n > 0 && (ind + 1) * 2 + int(head.size() + body.size() + add.size()) > kMaxLine - 6) break;
-            body += add;
-            ++n;
-        }
-        bool last = base + n >= labels.size();
-        if (base == 0) line(ind, "IF " + t + " <= " + std::to_string(n) + " THEN");
-        else if (!last) line(ind, "ELSEIF " + t + " <= " + std::to_string(base + n) + " THEN");
-        else line(ind, "ELSE");
-        line(ind + 1, head + body);
-        base += n;
-    }
-    line(ind, "END IF");
-}
-
-// Splits ON ... GOSUB, INPUT # and PRINT statements with long lists.
-bool Emitter::splitList(const Stmt& s, int ind) {
-    const auto& ps = s.parts;
-    if (s.kind != SK::Text || ps.empty() || ps[0].expr) return false;
-    if (!s.targets.empty() && ps.size() == 3 && ps[0].text == "ON " && ps[1].expr && ps[2].text == " GOSUB ") {
-        std::vector<std::string> labels;
-        for (uint16_t t : s.targets) labels.push_back(names_.label(t));
-        onTargets(printer_.expr(ps[1].expr, Ty::Int), ps[1].expr, labels, "GOSUB", ind);
+// Breaks a line longer than QB accepts. A statement continues on the next line
+// after " _" (wherever there could be a space, but not in a string); the
+// continuation is indented a little more. DATA can't be continued (the rest of
+// the line is data), so a long DATA line becomes several DATA statements.
+// Returns false when there is nowhere to break.
+bool breakLine(const std::string& line, std::vector<std::string>& out) {
+    if (int(line.size()) <= kMaxLine) {
+        out.push_back(line);
         return true;
     }
-    if (!s.targets.empty() || s.hasTarget) return false;
-
-    // head, items (each with its separator) and what follows the last item
-    std::vector<Part> head;
-    std::vector<std::vector<Part>> items;
-    std::vector<Part> tail;
-    bool isPrint = false;
-    if (ps[0].text == "INPUT #" && ps.size() >= 4 && ps[1].expr && ps[2].text == ", ") {
-        // INPUT #f, a, b, c
-        head.assign(ps.begin(), ps.begin() + 3);
-        for (size_t k = 3; k < ps.size(); ++k) {
-            if (ps[k].expr) items.push_back({ps[k]});
-            else if (ps[k].text == ", " && !items.empty()) items.back().push_back(ps[k]);
-            else return false;
-        }
-    } else if (ps[0].text == "PRINT" || ps[0].text == "LPRINT") {
-        // PRINT a; b, c   (not PRINT USING, not to a file)
-        isPrint = true;
-        head = {ps[0], P(" ")};
-        for (size_t k = 1; k < ps.size(); ++k) {
-            const std::string& tx = ps[k].text;
-            if (ps[k].expr) items.push_back({ps[k]});
-            else if (tx == " " || tx.empty()) continue;
-            else if (!items.empty() && (tx == "; " || tx == ";" || tx == ", " || tx == ","))
-                items.back().push_back(ps[k]);
-            else return false;
-        }
-        if (!items.empty() && items.back().size() > 1) {
-            tail.push_back(items.back().back());
-            items.back().pop_back();
-        }
-    } else {
+    size_t indent = line.find_first_not_of(' ');
+    if (indent == std::string::npos) indent = 0;
+    // the statement starts after an optional line number
+    size_t stmt = indent;
+    while (stmt < line.size() && std::isdigit(static_cast<unsigned char>(line[stmt]))) ++stmt;
+    if (stmt > indent && stmt < line.size() && line[stmt] == ' ') ++stmt;
+    else stmt = indent;
+    if (line.compare(stmt, 1, "'") == 0 || line.compare(stmt, 3, "REM") == 0) {
+        out.push_back(line);
         return false;
     }
-    if (items.size() < 2) return false;
-    for (auto& it : items)
-        if (it.size() == 1) it.push_back(P(isPrint ? "; " : ", "));
-    size_t i = 0;
-    while (i < items.size()) {
-        Stmt c = s;
-        c.parts = head;
-        size_t n = 0;
-        for (; i + n < items.size(); ++n) {
-            Stmt t = c;
-            t.parts.insert(t.parts.end(), items[i + n].begin(), items[i + n].end());
-            if (n > 0 && ind * 2 + int(printer_.stmt(t).size()) > kMaxLine - 8) break;
-            c = t;
+
+    if (line.compare(stmt, 5, "DATA ") == 0) {
+        // the last comma outside quotes that keeps the first part short enough
+        size_t cut = std::string::npos;
+        bool quoted = false;
+        for (size_t i = stmt + 5; i < line.size() && int(i) < kMaxLine; ++i) {
+            if (line[i] == '"') quoted = !quoted;
+            else if (line[i] == ',' && !quoted) cut = i;
         }
-        i += n;
-        // the separator after the chunk's last item
-        std::string sep = c.parts.back().text;
-        c.parts.pop_back();
-        if (i < items.size()) {
-            // PRINT continues on the same output line: keep ";" or ","
-            if (isPrint) c.parts.push_back(P(sep.substr(0, 1)));
-        } else {
-            c.parts.insert(c.parts.end(), tail.begin(), tail.end());
-        }
-        line(ind, printer_.stmt(c));
-    }
-    return true;
-}
-
-namespace {
-
-bool impureFunc(const std::string& n) {
-    static const char* names[] = {"RND", "INKEY$", "INPUT$", "TIMER", "INP", "EOF", "LOC", "LOF",
-                                  "CSRLIN", "POS", "LPOS", "FRE", "ERR", "ERL", "PEEK", "STICK",
-                                  "STRIG", "PEN", "PLAY", "SCREEN", "VARPTR", "VARPTR$"};
-    for (const char* x : names)
-        if (n == x) return true;
-    return false;
-}
-
-} // namespace
-
-// Moves one pure subexpression of `roots` into a temporary. `excess` is how many
-// characters the line has to lose, `budget` the length the temporary's value may
-// have to fit on a line of its own.
-bool Emitter::hoist(std::vector<ExprPtr*> roots, const std::vector<bool>& rootOk, int excess, int budget, ExprPtr& tmp,
-                    ExprPtr& value) {
-    // what the FN calls of the statement may change must not move
-    std::set<uint16_t> fnWrites;
-    bool fnMulti = false;
-    for (ExprPtr* r : roots)
-        walkExpr(*r, [&](const ExprPtr& n) {
-            if (n->kind != EK::FnCall) return;
-            auto w = info_.fnBodyWrites.find(n->addr);
-            if (w != info_.fnBodyWrites.end()) fnWrites.insert(w->second.begin(), w->second.end());
-            const Proc* fp = program_.procAt(n->addr);
-            if (fp && fp->kind == ProcKind::DefFn) fnMulti = true;
-        });
-    auto pure = [&](const ExprPtr& e) {
-        bool ok = true;
-        walkExpr(e, [&](const ExprPtr& n) {
-            switch (n->kind) {
-            case EK::FnCall: case EK::Unknown: case EK::Phi: ok = false; break;
-            case EK::Raw: if (!n->sval.empty() && n->sval[0] == '@') ok = false; break;
-            case EK::Func: if (impureFunc(n->sval) || n->sval.rfind("@", 0) == 0) ok = false; break;
-            case EK::Var: if (fnWrites.count(n->addr)) ok = false; break;
-            case EK::ArrElem: case EK::Param: if (fnMulti) ok = false; break;
-            default: break;
-            }
-        });
-        return ok;
-    };
-    struct Cand {
-        ExprPtr e;
-        int len;
-        int count;
-    };
-    std::vector<Cand> cands;
-    for (size_t i = 0; i < roots.size(); ++i) {
-        walkExpr(*roots[i], [&](const ExprPtr& n) {
-            if (n == *roots[i] && !rootOk[i]) return;
-            if (n->kind != EK::Binary && n->kind != EK::Unary && n->kind != EK::Func && n->kind != EK::Conv &&
-                n->kind != EK::ArrElem)
-                return;
-            if (n->type != Ty::Int && n->type != Ty::Sng && n->type != Ty::Dbl && n->type != Ty::Str) return;
-            if (!pure(n)) return;
-            int len = int(printer_.expr(n, n->type).size());
-            if (len < 12) return;
-            for (Cand& c : cands)
-                if (exprEqual(c.e, n)) {
-                    ++c.count;
-                    return;
-                }
-            cands.push_back({n, len, 1});
-        });
-    }
-    if (cands.empty()) return false;
-    auto saving = [](const Cand& c) { return c.count * (c.len - 6); };
-    const Cand* best = nullptr;
-    // the smallest change that is enough, else the biggest that fits on a line
-    for (const Cand& c : cands)
-        if (c.len <= budget && saving(c) >= excess && (!best || saving(c) < saving(*best))) best = &c;
-    if (!best)
-        for (const Cand& c : cands)
-            if (c.len <= budget && (!best || saving(c) > saving(*best))) best = &c;
-    if (!best)
-        for (const Cand& c : cands)
-            if (!best || saving(c) > saving(*best)) best = &c;
-    value = best->e;
-    tmp = mkRaw(newTemp(value->type), value->type);
-    for (ExprPtr* r : roots)
-        *r = rewriteExpr(*r, [&](const ExprPtr& n) { return exprEqual(n, value) ? tmp : n; });
-    return true;
-}
-
-// Shortens the statement or condition behind a line that is too long by moving
-// part of it into a temporary assigned just before.
-bool Emitter::shortenLine(const OutLine& l) {
-    const LineSrc& s = l.src;
-    if (!s.valid()) return false;
-    LiftedBlock& lbk = results_[size_t(s.pi)][size_t(s.b)];
-    int len = l.indent * 2 + int(l.text.size()) + 6;
-    int excess = len - kMaxLine;
-    int budget = kMaxLine - 6 - (l.indent + 1) * 2 - 10;
-    ExprPtr tmp, value;
-    if (s.k >= 0) {
-        if (size_t(s.k) >= lbk.stmts.size()) return false;
-        Stmt& st = lbk.stmts[size_t(s.k)];
-        std::vector<ExprPtr*> roots;
-        std::vector<bool> ok;
-        if (st.kind == SK::Assign) {
-            roots = {&st.lhs, &st.rhs};
-            ok = {false, false};
-        } else if (st.kind == SK::Text && !st.parts.empty() && !st.parts[0].expr) {
-            // statements whose expressions are all values
-            static const char* kws[] = {"PRINT", "LPRINT", "WRITE", "PLAY", "SOUND", "LOCATE", "COLOR", "PSET",
-                                        "PRESET", "LINE (", "LINE -", "CIRCLE", "DRAW", "OUT", "POKE", "ERROR"};
-            bool known = false;
-            for (const char* kw : kws)
-                if (st.parts[0].text.rfind(kw, 0) == 0) known = true;
-            if (!known) return false;
-            for (Part& p : st.parts)
-                if (p.expr) {
-                    roots.push_back(&p.expr);
-                    ok.push_back(true);
-                }
-        } else {
+        if (cut == std::string::npos) {
+            out.push_back(line);
             return false;
         }
-        if (!hoist(roots, ok, excess, budget, tmp, value)) return false;
-        uint16_t addr = st.addr;
-        lbk.stmts.insert(lbk.stmts.begin() + s.k, mkAssign(addr, tmp, value));
-        return true;
+        size_t rest = line.find_first_not_of(' ', cut + 1);
+        out.push_back(line.substr(0, cut));
+        return breakLine(std::string(indent, ' ') + "DATA " + (rest == std::string::npos ? "" : line.substr(rest)), out);
     }
-    if (!lbk.cond) return false;
-    if (!hoist({&lbk.cond}, {true}, excess, budget, tmp, value)) return false;
-    const Block& bk = program_.procs()[size_t(s.pi)].blocks[size_t(s.b)];
-    lbk.stmts.push_back(mkAssign(uint16_t(bk.end - 1), tmp, value));
-    return true;
-}
 
-namespace {
+    // Break at a space outside strings, preferably after a list separator or
+    // next to an operator; the first part (with " _") must fit.
+    auto isOp = [](char c) { return std::strchr("+-*/\\^=<>", c) != nullptr; };
+    auto wordAt = [&](size_t p, const char* w) {
+        size_t n = std::strlen(w);
+        return line.compare(p, n, w) == 0 && (p + n == line.size() || line[p + n] == ' ');
+    };
+    auto wordBefore = [&](size_t p, const char* w) {
+        size_t n = std::strlen(w);
+        return p >= n && line.compare(p - n, n, w) == 0 && (p == n || line[p - n - 1] == ' ');
+    };
+    static const char* kWords[] = {"AND", "OR", "XOR", "EQV", "IMP", "MOD", "THEN", "ELSE", "TO", "STEP"};
+    size_t good = std::string::npos, any = std::string::npos;
+    bool quoted = false;
+    size_t firstSpace = line.find(' ', stmt);
+    for (size_t i = stmt; i < line.size() && int(i) + 2 <= kMaxLine; ++i) {
+        if (line[i] == '"') quoted = !quoted;
+        if (quoted || line[i] != ' ' || i <= firstSpace || i + 1 >= line.size() || line[i + 1] == ' ') continue;
+        any = i;
+        char prev = line[i - 1], next = line[i + 1];
+        bool pref = prev == ',' || prev == ';' || isOp(prev) || isOp(next);
+        for (const char* w : kWords)
+            if (wordAt(i + 1, w) || wordBefore(i, w)) pref = true;
+        if (pref) good = i;
+    }
+    size_t cut = good != std::string::npos ? good : any;
+    if (cut == std::string::npos) {
+        out.push_back(line);
+        return false;
+    }
+    out.push_back(line.substr(0, cut) + " _");
+    return breakLine(std::string(indent + 4, ' ') + line.substr(cut + 1), out);
+}
 
 // The highest variable address ("variXXXX") a line mentions, -1 if none.
 int maxVarRef(const std::string& s) {
@@ -1505,57 +1287,26 @@ std::string Emitter::run(const DecompileOptions& opt, const std::string& inputNa
     }
     if (anyDynamic) header.push_back({0, "REM $DYNAMIC", -1});
 
-    // single line DEF FNs that are too long become multi-line ones with temporaries
+    for (uint32_t pi = 0; pi < program_.procs().size(); ++pi) makeView(pi);
+    // DEF FN definitions come first so that they precede their use
+    std::vector<OutLine> fnLines;
     for (uint32_t pi = 0; pi < program_.procs().size(); ++pi) {
-        const Proc& p = program_.procs()[pi];
-        auto it = info_.fns.find(p.entry);
-        if (p.kind != ProcKind::DefFnSingle || it == info_.fns.end()) continue;
-        FnInfo& fi = it->second;
-        for (int guard = 0; guard < 50; ++guard) {
-            out_.clear();
-            emitProc(pi, 0);
-            int len = 0;
-            for (const OutLine& l : out_) len = std::max(len, l.indent * 2 + int(l.text.size()));
-            if (len <= kMaxLine - 6) break;
-            ExprPtr tmp, value;
-            if (!hoist({&fi.body}, {false}, len - (kMaxLine - 6), kMaxLine - 20, tmp, value)) break;
-            fnTemps_[p.entry].push_back({tmp, value});
-        }
-    }
-
-    std::vector<OutLine> fnLines, mainLines, subLines;
-    for (int round = 0;; ++round) {
-        refLabels_.clear();
-        labelCanon_.clear();
-        pendingLines_.clear();
-        src_ = LineSrc();
-        fnLines.clear();
-        subLines.clear();
-        for (uint32_t pi = 0; pi < program_.procs().size(); ++pi) makeView(pi);
-        // DEF FN definitions come first so that they precede their use
-        for (uint32_t pi = 0; pi < program_.procs().size(); ++pi) {
-            ProcKind k = program_.procs()[pi].kind;
-            if (k != ProcKind::DefFn && k != ProcKind::DefFnSingle) continue;
-            out_.clear();
-            emitProc(pi, 0);
-            fnLines.insert(fnLines.end(), out_.begin(), out_.end());
-        }
+        ProcKind k = program_.procs()[pi].kind;
+        if (k != ProcKind::DefFn && k != ProcKind::DefFnSingle) continue;
         out_.clear();
-        emitProc(0, 0);
-        mainLines = out_;
-        for (uint32_t pi = 0; pi < program_.procs().size(); ++pi) {
-            if (program_.procs()[pi].kind != ProcKind::Sub) continue;
-            out_.clear();
-            subLines.push_back({0, "", -1});
-            emitProc(pi, 0);
-            subLines.insert(subLines.end(), out_.begin(), out_.end());
-        }
-        // shorten the lines that are too long and structure the program again
-        bool changed = false;
-        for (const auto* ls : {&fnLines, &mainLines, &subLines})
-            for (const OutLine& l : *ls)
-                if (l.label == -1 && l.indent * 2 + int(l.text.size()) + 6 > kMaxLine && shortenLine(l)) changed = true;
-        if (!changed || round >= 40) break;
+        emitProc(pi, 0);
+        fnLines.insert(fnLines.end(), out_.begin(), out_.end());
+    }
+    out_.clear();
+    emitProc(0, 0);
+    std::vector<OutLine> mainLines = out_;
+    std::vector<OutLine> subLines;
+    for (uint32_t pi = 0; pi < program_.procs().size(); ++pi) {
+        if (program_.procs()[pi].kind != ProcKind::Sub) continue;
+        out_.clear();
+        subLines.push_back({0, "", -1});
+        emitProc(pi, 0);
+        subLines.insert(subLines.end(), out_.begin(), out_.end());
     }
 
     std::string text;
@@ -1592,8 +1343,10 @@ std::string Emitter::run(const DecompileOptions& opt, const std::string& inputNa
             }
             std::string s(size_t(l.indent) * 2, ' ');
             s += prefix + l.text;
-            if (int(s.size()) > kMaxLine) warnings_.push_back("line longer than " + std::to_string(kMaxLine) + " characters: " + s.substr(0, 60) + "...");
-            text += s + "\n";
+            std::vector<std::string> parts;
+            if (!breakLine(s, parts))
+                warnings_.push_back("line longer than " + std::to_string(kMaxLine) + " characters: " + s.substr(0, 60) + "...");
+            for (const std::string& p : parts) text += p + "\n";
         }
         flushBare();
     };
