@@ -34,13 +34,16 @@ struct LoadedProgram {
     std::vector<uint8_t> code;    // code segment, indexed by CS offset
     uint16_t codeStart = 0x30;
     uint16_t codeEnd = 0;
-    uint8_t flags = 0;            // compile flags byte at CS:0x2F (0x08 event trapping, 0x20 $DYNAMIC, 0x40 NOP padding)
-    uint8_t flags2 = 0;           // byte at CS:0x2E (bit 0: compiled with /D)
+    uint8_t flags = 0;            // compile flags byte at CS:0x2F (0x01 /R, 0x08 event trapping /W, 0x04 /V,
+                                  // 0x20 $DYNAMIC, 0x40 NOP padding)
+    uint8_t flags2 = 0;           // byte at CS:0x2E (0x01 /D, 0x10 /S, 0x20 /X, 0x40 /E; programs written
+                                  // by the QB environment also have 0x80 and 0x08)
 
     std::vector<uint8_t> ds;      // 64K image of the data segment
     std::vector<bool> dsInit;     // bytes with initial values (literals)
     uint16_t dsVarStart = 0x1856;
     uint16_t dsEnd = 0;
+    uint16_t slotBase = 0;        // temporaries: 8 byte slots from here (at dsEnd in linked programs)
     // COMMON block (header words CS:18h and CS:1Ah), kept by CHAIN
     uint16_t commonStart = 0;
     uint16_t commonSize = 0;
@@ -53,6 +56,12 @@ struct LoadedProgram {
 
     bool debugBuild() const { return (flags2 & 0x01) != 0; }
     bool eventTrapping() const { return (flags & 0x08) != 0; }
+    // compiler switches
+    bool optE() const { return (flags2 & 0x40) != 0; }
+    bool optX() const { return (flags2 & 0x20) != 0; }
+    bool optS() const { return (flags2 & 0x10) != 0; }
+    bool optR() const { return (flags & 0x01) != 0; }
+    bool optV() const { return (flags & 0x04) != 0; }
     // Number of padding bytes that follow every runtime opcode byte.
     int opcodePadding() const { return (flags & 0x40) ? 2 : 0; }
 

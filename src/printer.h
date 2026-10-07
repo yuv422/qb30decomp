@@ -23,6 +23,9 @@ struct NameResolver {
     std::function<Ty(uint16_t addr, size_t i)> fnParamType;
     // label for a code address
     std::function<std::string(uint16_t addr)> label;
+    // compiled with /R (arrays in row order): QB stores the subscripts last first,
+    // so the subscripts found in the code are printed in reverse
+    bool rowOrder = false;
 };
 
 class Printer {

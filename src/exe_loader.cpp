@@ -96,6 +96,10 @@ void loadBz(const std::vector<uint8_t>& file, size_t loadStart, LoadedProgram& p
     if (!haveCode) throw std::runtime_error("no code record found");
     prog.codeEnd = uint16_t(prog.code.size());
     prog.dsEnd = rd16(prog.code, 0x10);
+    // the QB environment puts the temporaries (8 byte slots) where header word
+    // +12h says, not at the end of the data
+    uint16_t slots = rd16(prog.code, 0x12);
+    prog.slotBase = slots >= prog.dsVarStart && slots < prog.dsEnd ? slots : prog.dsEnd;
 }
 
 void loadBm(const std::vector<uint8_t>& file, size_t loadStart, LoadedProgram& prog, bool verbose) {
@@ -111,6 +115,7 @@ void loadBm(const std::vector<uint8_t>& file, size_t loadStart, LoadedProgram& p
     uint16_t codePara = rd16(f, loadStart + 0x24);
     if (codePara && size_t(codePara) * 16 <= codeLen) prog.codeEnd = uint16_t(codePara * 16);
     prog.dsEnd = rd16(f, loadStart + 0x10);
+    prog.slotBase = prog.dsEnd; // the temporaries follow the variables
     // the line number table follows the code (header word +0x0A, 0 if there is none)
     uint16_t lineTab = rd16(f, loadStart + 0x0a);
     if (lineTab >= 0x30 && lineTab < codeLen) parseLineTable(f, loadStart + lineTab, loadStart + codeLen, prog);

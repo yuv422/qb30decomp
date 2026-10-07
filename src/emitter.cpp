@@ -153,6 +153,7 @@ private:
 };
 
 void Emitter::setupNames() {
+    names_.rowOrder = program_.prog().optR();
     names_.var = [](uint16_t a, Ty t) { return "vari" + hex4(a) + tySuffix(t); };
     names_.array = [this](uint16_t a, Ty t) {
         auto it = pinfo_.arrays.find(a);
@@ -1139,11 +1140,15 @@ std::string Emitter::run(const DecompileOptions& opt, const std::string& inputNa
         if (in.rt.is(0x3f, 0x02) || in.rt.is(0x3f, 0x09)) onError = true;
         if (in.rt.is(0x3e, 0x12) || in.rt.is(0x3e, 0x13)) resumeNext = true;
     }
+    // the compiler switches recorded in the header (and those the code needs)
     std::string opts;
     if (prog.debugBuild()) opts += " /D";
-    if (onError || resumeNext) opts += " /E";
-    if (resumeNext) opts += " /X";
-    if (prog.eventTrapping()) opts += " /W";
+    if (prog.optE() || onError || resumeNext) opts += " /E";
+    if (prog.optR()) opts += " /R";
+    if (prog.optS()) opts += " /S";
+    if (prog.optV()) opts += " /V";
+    else if (prog.eventTrapping()) opts += " /W";
+    if (prog.optX() || resumeNext) opts += " /X";
     if (opt.comments) {
         header.push_back({0, "' Decompiled from " + inputName + " by qb30decomp", -1});
         if (!prog.sourceName.empty()) header.push_back({0, "' Original source: " + prog.sourceName, -1});
@@ -1161,9 +1166,11 @@ std::string Emitter::run(const DecompileOptions& opt, const std::string& inputNa
         const ArrayInfo& ai = kv.second;
         if (ai.dynamic) continue;
         std::string s = "DIM " + names_.array(ai.base, ai.type) + "(";
-        for (size_t d = 0; d < ai.dims.size(); ++d) {
+        std::vector<int> dims = ai.dims;
+        if (prog.optR()) std::reverse(dims.begin(), dims.end());
+        for (size_t d = 0; d < dims.size(); ++d) {
             if (d) s += ", ";
-            s += std::to_string(ai.dims[d] - 1);
+            s += std::to_string(dims[d] - 1);
         }
         s += ")";
         bool inCommon = prog.commonSize && ai.base >= prog.commonStart && ai.base < prog.commonEnd();
@@ -1254,7 +1261,9 @@ std::string Emitter::run(const DecompileOptions& opt, const std::string& inputNa
                 if (h.addr > a) plainFill(a, h.addr);
                 if (h.array) {
                     std::string d = "DIM " + names_.array(h.addr, h.type) + "(";
-                    for (size_t k = 0; k < h.dims.size(); ++k) d += (k ? ", " : "") + std::to_string(h.dims[k] - 1);
+                    std::vector<int> hd = h.dims;
+                    if (prog.optR()) std::reverse(hd.begin(), hd.end());
+                    for (size_t k = 0; k < hd.size(); ++k) d += (k ? ", " : "") + std::to_string(hd[k] - 1);
                     header.push_back({0, d + ")", -1});
                     list.push_back(names_.array(h.addr, h.type) + "()");
                 } else {
@@ -1351,6 +1360,30 @@ std::string Emitter::run(const DecompileOptions& opt, const std::string& inputNa
         flushBare();
     };
     placeDims(lateDims, fnLines, mainLines);
+    // QB keeps the DEF SEG segment across CHAIN. A program built differently from
+    // the one that chains to it gets its data at another address, so BLOAD,
+    // BSAVE, PEEK and POKE would go to the old program's memory: start with the
+    // program's own data segment
+    {
+        bool segUse = false;
+        for (const auto& kv : program_.dis().insns()) {
+            const Insn& in = kv.second;
+            if (in.isRt && (in.rt.is(0x3e, 0x1a) || in.rt.is(0x3e, 0x1b) || in.rt.is(0x3d, 0x62) ||
+                            in.rt.is(0x3e, 0xa5) || in.rt.is(0x3f, 0x00)))
+                segUse = true;
+            if (!in.isRt && in.zi.mnemonic == ZYDIS_MNEMONIC_CALL && program_.externalName(in) == "ABSOLUTE")
+                segUse = true;
+        }
+        size_t first = 0;
+        while (first < mainLines.size() && mainLines[first].label != -1) ++first;
+        bool hasReset = first < mainLines.size() && mainLines[first].text == "DEF SEG";
+        if (segUse && !hasReset) {
+            std::vector<OutLine> reset;
+            if (opt.comments) reset.push_back({0, "' QB keeps DEF SEG across CHAIN: use this program's data", -1});
+            reset.push_back({0, "DEF SEG", -1});
+            mainLines.insert(mainLines.begin(), reset.begin(), reset.end());
+        }
+    }
     emitLines(header);
     emitLines(fnLines);
     emitLines(mainLines);

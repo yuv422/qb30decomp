@@ -2,6 +2,7 @@
 #include "lifter_impl.h"
 #include "simplify.h"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace qb {
@@ -941,6 +942,8 @@ void Lifter::Impl::execRt(const Insn& in) {
                 info.dynArrays[uint16_t(a)] = t;
                 info.dynDims[uint16_t(a)] = dims;
             }
+            // with /R the bounds come last dimension first
+            if (prog.optR()) std::reverse(bounds.begin(), bounds.end());
             std::vector<Part> p{P(redim ? "REDIM " : "DIM "), P(arrayRef(uint16_t(a), t, true)), P("(")};
             for (int i = 0; i < dims; ++i) {
                 if (i) p.push_back(P(", "));

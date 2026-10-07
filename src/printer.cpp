@@ -2,6 +2,7 @@
 
 #include "mbf.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cmath>
 #include <cstdio>
@@ -140,6 +141,24 @@ std::string Printer::cond(const ExprPtr& e) const {
     return expr(e, 0, false, Ty::Unknown);
 }
 
+namespace {
+
+bool isNegLit(const ExprPtr& e) {
+    ExprPtr s = stripConv(e);
+    return s && ((s->kind == EK::IntLit && s->ival < 0 && s->ival != -32768) ||
+                 ((s->kind == EK::SngLit || s->kind == EK::DblLit) && s->dval < 0));
+}
+
+// Is e printed as an addition ("x + 5", or "x - -5" printed as "x + 5")?
+bool printsAsPlus(const ExprPtr& e) {
+    if (!e || e->kind != EK::Binary) return false;
+    if (e->op == Op::Add) return !isNegLit(e->args[1]);
+    if (e->op == Op::Sub) return isNegLit(e->args[1]);
+    return false;
+}
+
+} // namespace
+
 std::string Printer::expr(const ExprPtr& e, int parentPrec, bool rightSide, Ty want) const {
     if (!e) return "???";
     int prec = precOf(e);
@@ -173,7 +192,8 @@ std::string Printer::expr(const ExprPtr& e, int parentPrec, bool rightSide, Ty w
         if (e->flags & AF_ByteOffset) return name + "(???)";
         for (size_t i = 0; i < e->args.size(); ++i) {
             if (i) s += ", ";
-            s += expr(e->args[i], 0, false, Ty::Int);
+            size_t k = names_.rowOrder ? e->args.size() - 1 - i : i;
+            s += expr(e->args[k], 0, false, Ty::Int);
         }
         return s + ")";
     }
@@ -237,6 +257,25 @@ std::string Printer::expr(const ExprPtr& e, int parentPrec, bool rightSide, Ty w
                 return expr(ne, parentPrec, rightSide, want);
             }
         }
+        // QB computes "a / b / c" as "a / (b * c)" (and reorders a product written
+        // as the divisor): write such a division as successive divisions
+        if (op == Op::Div) {
+            ExprPtr sl = stripConv(l), sr = stripConv(r);
+            bool chainLeft = sl && sl->kind == EK::Binary && (sl->op == Op::Mul || sl->op == Op::Div);
+            if (sr && sr->kind == EK::Binary && sr->op == Op::Mul && sr->type == e->type && !chainLeft) {
+                std::vector<ExprPtr> factors;
+                ExprPtr f = sr;
+                while (f->kind == EK::Binary && f->op == Op::Mul && f->type == e->type) {
+                    factors.push_back(f->args[1]);
+                    f = f->args[0];
+                }
+                factors.push_back(f);
+                std::reverse(factors.begin(), factors.end());
+                ExprPtr ne = l;
+                for (const ExprPtr& x : factors) ne = mkBinary(Op::Div, ne, x, e->type);
+                return expr(ne, parentPrec, rightSide, want);
+            }
+        }
         Ty nat = naturalType(e->op, lt, rt);
         bool keepLeft = false;
         if (nat == t || t == Ty::Unknown) {
@@ -254,6 +293,10 @@ std::string Printer::expr(const ExprPtr& e, int parentPrec, bool rightSide, Ty w
         std::string rs = expr(pr, prec, true, t);
         // a negative number on the right of an operator needs parentheses
         if (!rs.empty() && rs[0] == '-') rs = "(" + rs + ")";
+        // QB moves a subtraction in front of the addition before it ("a + b - c"
+        // is computed as "a - c + b"), but not past parentheses: keep the order
+        // the code computes in
+        if (e->op == Op::Sub && printsAsPlus(stripConv(l))) ls = "(" + ls + ")";
         return wrap(ls + " " + opText(e->op) + " " + rs);
     }
     case EK::Func: {
@@ -293,8 +336,8 @@ std::string Printer::expr(const ExprPtr& e, int parentPrec, bool rightSide, Ty w
         s += "(";
         for (size_t i = 0; i < e->args.size(); ++i) {
             if (i) s += ", ";
-            Ty want = names_.fnParamType ? names_.fnParamType(e->addr, i) : Ty::Unknown;
-            s += expr(e->args[i], 0, false, want);
+            Ty pt = names_.fnParamType ? names_.fnParamType(e->addr, i) : Ty::Unknown;
+            s += expr(e->args[i], 0, false, pt);
         }
         return s + ")";
     }

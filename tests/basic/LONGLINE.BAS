@@ -1,5 +1,3 @@
-' ROUNDTRIP: compile
-' (the compiler reorders the long sum in DEF FNlong differently when recompiled)
 ' Lines that get too long with long variable names
 DEF FNlong (alpha, beta) = alpha * beta + (alpha - beta) / (alpha + beta + 1) - SQR(ABS(alpha * alpha - beta * beta)) + alpha / 3 - beta / 7 + (alpha > beta) * 100 + (alpha < beta) * 200
 DIM tbl(20, 20)

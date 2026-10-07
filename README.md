@@ -42,11 +42,16 @@ Variables are named `variXXXX` after their DS address with a type suffix
 DEF FN functions `FNfXXXX`. Programs compiled with /X, /E or /D carry a line
 number table; their line numbers are restored (so ERL and TRON give the same
 results) and used as label names. A `' QBOPTS:` comment lists the compiler
-switches the program needs (/E /X /W /D).
+switches the program was compiled with (/D /E /R /S /V /W /X, read from the
+executable's header). With /R (arrays in row order) subscripts are printed in
+source order.
 
 The output keeps the program's memory layout where it can:
 - The COMMON block is declared with every variable at its original offset;
   parts the program never uses get placeholder variables named by address.
+- Programs that use BLOAD, BSAVE, PEEK, POKE or CALL ABSOLUTE start with
+  `DEF SEG`: QB keeps the DEF SEG segment across CHAIN, and a rebuilt program
+  may have its data somewhere else than the one that chains to it.
 - Static arrays are declared where QB allocated them, just before the first
   line that uses something allocated after them. Unused space after an array
   is reserved too.
@@ -56,6 +61,13 @@ expressions much longer than in the original. A longer statement is continued
 on the next line with ` _` (QB allows this wherever a space may be, but not in
 a string). DATA can't be continued, so a long DATA line becomes several DATA
 statements.
+
+Expressions are printed so that QB compiles them in the order the original code
+evaluates them (floating point results depend on it). QB reorders as it
+compiles: "a + b - c" becomes "a - c + b" and "a / b / c" becomes
+"a / (b * c)". So an addition followed by a subtraction gets parentheses,
+"(a + b) - c", and a product used as a divisor is written as successive
+divisions. The EVALORD test covers this.
 
 ## How it works
 
@@ -105,7 +117,3 @@ opcode, SUB1F1D.EXE writes past an undeclared array).
   unreachable code, and only writes a line number table with /E or /X. A
   second decompile of such a program can therefore differ (adjacent arrays may
   merge into one), although it behaves the same.
-- The compiler reorders the terms of long sums. The order the decompiler prints
-  (the order the code evaluates them in) is not always reproduced when the
-  output is compiled again, which can change the last bit of a floating point
-  result (LONGLINE test).

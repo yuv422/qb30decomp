@@ -295,6 +295,8 @@ std::map<uint16_t, ArrayInfo> computeArrays(const LoadedProgram& prog, std::vect
         if (hb != hintBounds.end() && *hb < end) end = *hb;
         // an array in COMMON ends with it
         if (prog.commonSize && b < prog.commonEnd() && end > prog.commonEnd()) end = prog.commonEnd();
+        // nor into the temporaries
+        if (b < prog.slotBase && end > prog.slotBase) end = prog.slotBase;
         return end;
     };
 

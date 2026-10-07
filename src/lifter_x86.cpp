@@ -551,6 +551,15 @@ void Lifter::Impl::execX86(const Insn& in) {
             // registers: the compiler evaluates the bigger operand first; keep that order
             commute = exprWeight(vb) >= exprWeight(va);
         }
+        // a value saved in the frame while the other operand was computed (e.g. across
+        // a DEF FN call) was computed first: it is the left operand
+        if (op != Op::Sub && d.type == ZYDIS_OPERAND_TYPE_REGISTER && s.type == ZYDIS_OPERAND_TYPE_MEMORY &&
+            s.mem.base == ZYDIS_REGISTER_BP && s.mem.index == ZYDIS_REGISTER_NONE) {
+            int off = s.mem.disp.has_displacement ? int(int16_t(s.mem.disp.value)) : 0;
+            // (a variable kept in the frame from earlier statements says nothing)
+            auto fr = st.frame.find(off);
+            if (off < 0 && fr != st.frame.end() && fr->second.e && !isSimpleValue(fr->second.e)) commute = true;
+        }
         ExprPtr r = commute ? simplifyInt(mkBinary(op, vb, va, Ty::Int)) : simplifyInt(mkBinary(op, va, vb, Ty::Int));
         writeOperand(in, 0, r, nullptr);
         st.flags.kind = Flags::Test;

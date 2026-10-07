@@ -123,7 +123,7 @@ struct Lifter::Impl {
 
     Impl(Program& p, GlobalInfo& i, std::vector<std::vector<LiftedBlock>>& r, std::vector<std::string>& w)
         : program(p), prog(p.prog()), info(i), results(r), warnings(w) {
-        slotBase = prog.dsEnd;
+        slotBase = prog.slotBase;
     }
 
     // ---- diagnostics
