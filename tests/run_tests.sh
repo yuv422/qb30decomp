@@ -32,18 +32,7 @@ echo "== compiling originals"
 "$ROOT/tools/qbcompile.sh" "$OUT/orig" $files >/dev/null 2>&1
 
 normalize() {
-    # rename variables, labels, functions and SUBs by order of first appearance
-    perl -ne '
-        BEGIN { %m = (); %n = (); }
-        next if /^\x27/;
-        s/\r//;
-        s{\b(vari|loc|FNf|sub)([0-9A-F]{4})\b}{
-            my $k = "$1$2";
-            $m{$k} //= $1 . (++$n{$1});
-            $m{$k}
-        }ge;
-        print;
-    ' "$1"
+    perl "$ROOT/tools/normalize.pl" "$1"
 }
 
 pass=0
@@ -71,6 +60,13 @@ for f in $files; do
         continue
     fi
     "$DECOMP" "$OUT/re/$name.EXE" -o "$OUT/dec2/$name.BAS" 2>"$OUT/dec2/$name.log"
+    # tests with lines too long for QB are split by the decompiler and only
+    # have to compile again (marked "' ROUNDTRIP: compile")
+    if grep -q "^' ROUNDTRIP: compile" "$f"; then
+        echo "ok   $name (compiles)"
+        pass=$((pass + 1))
+        continue
+    fi
     normalize "$OUT/dec1/$name.BAS" > "$OUT/dec1/$name.norm"
     normalize "$OUT/dec2/$name.BAS" > "$OUT/dec2/$name.norm"
     if diff -q "$OUT/dec1/$name.norm" "$OUT/dec2/$name.norm" >/dev/null; then

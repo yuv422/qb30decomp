@@ -31,6 +31,7 @@ struct StaticEvidence {
     std::vector<Linear> offsets;   // byte offsets
     std::vector<int> debugDims;    // dimensions from /D bounds checking layout
     bool fromRef = false;
+    bool varptrOnly = false;       // only seen as VARPTR(x): an array if space follows it
 };
 
 // Dimension sizes (in elements) for a static array from its accesses.
@@ -87,7 +88,8 @@ std::vector<int> inferDims(const std::vector<Linear>& offs, int size, int totalE
         dims.push_back(d2);
         prod *= d2;
     }
-    int rest = totalElems > 0 ? (totalElems + prod - 1) / prod : 1;
+    // whole rows only: what is left over belongs to the variables that follow
+    int rest = totalElems > 0 ? totalElems / prod : 1;
     dims.push_back(std::max(rest, 1));
     return dims;
 }
@@ -239,6 +241,25 @@ std::map<uint16_t, ArrayInfo> computeArrays(const LoadedProgram& prog, std::vect
             }
         });
     });
+    // VARPTR(x) of a variable followed by space nothing uses: a buffer array
+    // (BLOAD/BSAVE/POKE) only used through its address and first element
+    forEachExprSlot(results, info, [&](ExprPtr& e, uint32_t) {
+        walkExpr(e, [&](const ExprPtr& n) {
+            if (n->kind != EK::Func || n->sval != "VARPTR" || n->args.size() != 1) return;
+            const ExprPtr& v = n->args[0];
+            if (v->kind != EK::Var || stat.count(v->addr)) return;
+            Ty t = v->type;
+            auto vt = info.varTypes.find(v->addr);
+            if (t == Ty::Unknown && vt != info.varTypes.end())
+                for (Ty x : vt->second)
+                    if (x != Ty::Unknown) t = x;
+            if (t == Ty::Unknown || t == Ty::Str) return;
+            StaticEvidence& ev = stat[v->addr];
+            ev.type = t;
+            ev.fromRef = true;
+            ev.varptrOnly = true;
+        });
+    });
     for (const auto& kv : info.staticArrays) {
         stat[kv.first].type = kv.second;
         stat[kv.first].fromRef = true;
@@ -247,6 +268,35 @@ std::map<uint16_t, ArrayInfo> computeArrays(const LoadedProgram& prog, std::vect
     // pass 1 var types (from all uses)
     for (const auto& kv : info.varTypes)
         for (Ty t : kv.second) varTypes[kv.first].insert(t);
+    // DEF FN parameters and results are scalars: an array ends before them
+    std::set<uint16_t> scalars;
+    for (const auto& kv : info.fns) {
+        for (uint16_t p : kv.second.params) scalars.insert(p);
+        if (kv.second.hasResultVar) scalars.insert(kv.second.resultVar);
+    }
+    // so are the COMMON variables of programs that share the block: their arrays
+    // (start and end) and the scalars that are not inside one of their arrays
+    std::set<uint16_t> hintBounds;
+    for (const CommonItem& h : info.commonHints) {
+        if (h.array) {
+            hintBounds.insert(h.addr);
+            hintBounds.insert(uint16_t(h.addr + h.size));
+            continue;
+        }
+        bool inArray = false;
+        for (const CommonItem& a : info.commonHints)
+            if (a.array && h.addr > a.addr && h.addr < a.addr + a.size) inArray = true;
+        if (!inArray) hintBounds.insert(h.addr);
+    }
+    auto scalarEnd = [&](uint16_t b, uint32_t end) {
+        auto it = scalars.upper_bound(b);
+        if (it != scalars.end() && *it < end) end = *it;
+        auto hb = hintBounds.upper_bound(b);
+        if (hb != hintBounds.end() && *hb < end) end = *hb;
+        // an array in COMMON ends with it
+        if (prog.commonSize && b < prog.commonEnd() && end > prog.commonEnd()) end = prog.commonEnd();
+        return end;
+    };
 
     // Accesses like A(2, j) use the address of A(2, 0) as displacement. Such
     // "bases" that fall inside an earlier array of the same type (with no
@@ -265,6 +315,7 @@ std::map<uint16_t, ArrayInfo> computeArrays(const LoadedProgram& prog, std::vect
             uint32_t end = prog.dsEnd > b ? prog.dsEnd : uint32_t(b) + uint32_t(size);
             for (uint16_t e : explicitBases)
                 if (e > b) { end = std::min<uint32_t>(end, e); break; }
+            end = scalarEnd(b, end);
             for (const auto& vt : varTypes) {
                 if (vt.first <= b || vt.first >= end) continue;
                 bool sameType = vt.second.count(t) && vt.second.size() == 1;
@@ -320,6 +371,7 @@ std::map<uint16_t, ArrayInfo> computeArrays(const LoadedProgram& prog, std::vect
         if (!bytes) {
             uint32_t end = prog.dsEnd > b ? prog.dsEnd : uint32_t(b) + uint32_t(size);
             if (bi + 1 < bases.size()) end = std::min<uint32_t>(end, bases[bi + 1]);
+            end = scalarEnd(b, end);
             for (const auto& vt : varTypes) {
                 if (vt.first <= b || vt.first >= end) continue;
                 bool sameType = vt.second.count(ai.type) && vt.second.size() == 1;
@@ -337,10 +389,21 @@ std::map<uint16_t, ArrayInfo> computeArrays(const LoadedProgram& prog, std::vect
                 }
             bytes = end > b ? end - b : uint32_t(size);
         }
-        ai.bytes = bytes;
         int total = int(bytes / uint32_t(size));
         if (!ev.debugDims.empty()) ai.dims = ev.debugDims;
         else ai.dims = inferDims(ev.offsets, size, total);
+        // the same array in a program sharing the COMMON block
+        for (const CommonItem& h : info.commonHints)
+            if (h.array && h.addr == b && h.type == ai.type && h.size == bytes && ev.debugDims.empty() && !h.dims.empty())
+                ai.dims = h.dims;
+        if (!info.arrayBytes.count(b)) {
+            uint32_t elems = 1;
+            for (int d : ai.dims) elems *= uint32_t(d);
+            bytes = std::min(bytes, elems * uint32_t(size));
+        }
+        ai.bytes = bytes;
+        // a variable whose address is taken but has nothing after it stays a variable
+        if (ev.varptrOnly && ai.bytes <= uint32_t(size)) continue;
         pinfo.arrays[b] = ai;
     }
     for (const auto& kv : info.dynArrays) {
@@ -384,6 +447,13 @@ ProgramInfo postprocess(Program& program, std::vector<std::vector<LiftedBlock>>&
             for (Ty t : it->second)
                 if (t != Ty::Unknown) return t;
         return Ty::Sng;
+    };
+    auto hasKnownType = [&](uint16_t a) {
+        auto it = varTypes.find(a);
+        if (it != varTypes.end())
+            for (Ty t : it->second)
+                if (t != Ty::Unknown) return true;
+        return false;
     };
     forEachExprSlot(results, info, [&](ExprPtr& e, uint32_t pi) {
         e = rewriteExpr(e, [&](const ExprPtr& n) -> ExprPtr {
@@ -453,7 +523,10 @@ ProgramInfo postprocess(Program& program, std::vector<std::vector<LiftedBlock>>&
             }
             if (n->kind == EK::Var) {
                 Ty t = n->type == Ty::Unknown ? resolveVarType(n->addr) : n->type;
-                if (const ArrayInfo* ai = staticArrayAt(n->addr, t)) {
+                // an untyped address (VARPTR) inside an array is an element of it
+                const ArrayInfo* ai = staticArrayAt(n->addr, t);
+                if (!ai && n->type == Ty::Unknown && !hasKnownType(n->addr)) ai = staticArrayAt(n->addr, Ty::Unknown);
+                if (ai) {
                     int size = tySize(ai->type);
                     Linear l;
                     l.constant = int32_t(n->addr - ai->base);

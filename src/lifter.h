@@ -8,6 +8,7 @@
 #pragma once
 
 #include "cfg.h"
+#include "common_layout.h"
 #include "ir.h"
 
 #include <map>
@@ -68,6 +69,7 @@ struct GlobalInfo {
     std::map<uint16_t, std::vector<std::vector<ExprPtr>>> subCallArgs; // sub -> args per call
     std::map<uint16_t, uint16_t> arrayBytes;  // static array base -> size in bytes (ERASE, GET)
     std::map<uint16_t, Ty> staticArrays;      // static arrays seen in ERASE
+    std::vector<CommonItem> commonHints;      // COMMON variables known from programs sharing the block
     std::map<uint16_t, uint32_t> arrayExtent; // static array base -> estimated size (after pass 1)
 };
 

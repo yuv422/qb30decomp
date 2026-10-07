@@ -41,6 +41,10 @@ struct LoadedProgram {
     std::vector<bool> dsInit;     // bytes with initial values (literals)
     uint16_t dsVarStart = 0x1856;
     uint16_t dsEnd = 0;
+    // COMMON block (header words CS:18h and CS:1Ah), kept by CHAIN
+    uint16_t commonStart = 0;
+    uint16_t commonSize = 0;
+    uint16_t commonEnd() const { return uint16_t(commonStart + commonSize); }
 
     std::vector<DataLine> dataLines;
     // ERL / TRON line table (/X, /E, /D): (code address, line number) pairs in

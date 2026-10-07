@@ -2,6 +2,7 @@
 
 #include "mbf.h"
 
+#include <cstdlib>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -311,8 +312,10 @@ std::string Printer::expr(const ExprPtr& e, int parentPrec, bool rightSide, Ty w
         if (e->sval == "@array") return names_.array(e->addr, e->type);
         if (e->sval == "@arrayarg") return names_.array(e->addr, e->type) + "()";
         return e->sval;
-    case EK::Phi:
     case EK::Unknown:
+        if (std::getenv("QBDEBUG")) return "???<" + e->sval + ">";
+        return "???";
+    case EK::Phi:
     default:
         return "???";
     }

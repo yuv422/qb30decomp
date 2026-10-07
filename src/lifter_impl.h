@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 
 namespace qb {
@@ -220,7 +221,7 @@ struct Lifter::Impl {
             }
             break;
         case EK::Binary:
-            if (p->op == Op::Add) {
+            if (p->op == Op::Add || p->op == Op::Sub) {
                 // dynamic string array: [descriptor] + offset (the constant part of
                 // the offset may have been folded to the top of the sum)
                 Linear l = toLinear(p);
@@ -239,10 +240,17 @@ struct Lifter::Impl {
                         return mkArrElem(0, t, {fromLinear(rest)}, AF_ByteOffset | AF_Dynamic | AF_Param, d->ival);
                     }
                 }
-                int32_t base;
+                int32_t base = 0;
                 ExprPtr off;
-                if (isIntLit(p->args[1], &base)) off = p->args[0];
-                else if (isIntLit(p->args[0], &base)) off = p->args[1];
+                if (p->op == Op::Add && isIntLit(p->args[1], &base)) off = p->args[0];
+                else if (p->op == Op::Add && isIntLit(p->args[0], &base)) off = p->args[1];
+                else if (l.constant != 0 && !l.terms.empty()) {
+                    // addresses above 7FFFh are negative literals: x - 2CB4h is x + D34Ch
+                    Linear rest = l;
+                    rest.constant = 0;
+                    base = l.constant;
+                    off = fromLinear(rest);
+                }
                 if (off) {
                     // dynamic string array: [descriptor] + offset
                     if (off->kind == EK::Var && info.dynArrays.count(off->addr) && off->type == Ty::Int) {
@@ -348,7 +356,7 @@ struct Lifter::Impl {
             case EK::ArrElem:
                 if (!(n->flags & (AF_Dynamic | AF_Param))) {
                     auto r = arrayRange(n->addr);
-                    if (addr + size > r.first && addr < r.second) hit = true;
+                    if (uint32_t(addr + size) > r.first && uint32_t(addr) < r.second) hit = true;
                 }
                 break;
             case EK::Param:

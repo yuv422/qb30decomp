@@ -13,17 +13,7 @@ rm -rf "$OUT"
 mkdir -p "$OUT/dec1" "$OUT/re" "$OUT/dec2"
 
 normalize() {
-    perl -ne '
-        BEGIN { %m = (); %n = (); }
-        next if /^\x27/;
-        s/\r//;
-        s{\b(vari|loc|FNf|sub)([0-9A-F]{4})\b}{
-            my $k = "$1$2";
-            $m{$k} //= $1 . (++$n{$1});
-            $m{$k}
-        }ge;
-        print;
-    ' "$1"
+    perl "$ROOT/tools/normalize.pl" "$1"
 }
 
 names=""

@@ -125,6 +125,10 @@ DecompileResult decompile(const LoadedProgram& prog, const DecompileOptions& opt
     dis.run();
     Program program(prog, dis);
     GlobalInfo info;
+    // what other programs know about the part of the COMMON block this one has
+    for (const CommonItem& h : opt.commonHints)
+        if (prog.commonSize && h.addr >= prog.commonStart && h.addr + h.size <= prog.commonEnd())
+            info.commonHints.push_back(h);
     prescanArrays(dis, info);
 
     Lifter lifter(program, info);
@@ -173,8 +177,43 @@ DecompileResult decompile(const LoadedProgram& prog, const DecompileOptions& opt
         return res;
     }
     ProgramInfo pinfo = postprocess(program, lifter.results(), info, res.warnings);
+    if (opt.layoutOnly) {
+        if (!prog.commonSize) return res;
+        const uint32_t cs = prog.commonStart, ce = prog.commonEnd();
+        for (const auto& kv : pinfo.arrays) {
+            const ArrayInfo& ai = kv.second;
+            if (ai.dynamic || ai.base < cs || ai.base >= ce) continue;
+            CommonItem it;
+            it.addr = ai.base;
+            it.size = ai.bytes;
+            it.type = ai.type;
+            it.array = true;
+            it.dims = ai.dims;
+            res.common.push_back(it);
+        }
+        for (const auto& kv : pinfo.varTypes) {
+            if (kv.first < cs || kv.first >= ce || kv.second == Ty::Unknown) continue;
+            bool inArray = false;
+            for (const CommonItem& a : res.common)
+                if (a.array && kv.first >= a.addr && kv.first < a.addr + a.size) inArray = true;
+            if (inArray) continue;
+            CommonItem it;
+            it.addr = kv.first;
+            it.type = kv.second;
+            it.size = kv.second == Ty::Int ? 2 : kv.second == Ty::Dbl ? 8 : 4;
+            res.common.push_back(it);
+        }
+        return res;
+    }
     res.source = emitProgram(program, lifter.results(), info, pinfo, opt, prog.moduleName, res.warnings);
     return res;
+}
+
+std::vector<CommonItem> commonLayout(const LoadedProgram& prog, const std::vector<CommonItem>& hints) {
+    DecompileOptions opt;
+    opt.layoutOnly = true;
+    opt.commonHints = hints;
+    return decompile(prog, opt).common;
 }
 
 } // namespace qb

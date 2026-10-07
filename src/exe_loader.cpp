@@ -107,6 +107,9 @@ void loadBm(const std::vector<uint8_t>& file, size_t loadStart, LoadedProgram& p
     if (loadStart + codeLen > f.size()) throw std::runtime_error("bad bm header");
     prog.code.assign(f.begin() + long(loadStart), f.begin() + long(loadStart + codeLen));
     prog.codeEnd = uint16_t(codeLen);
+    // the BASIC code segment (paragraphs); the runtime start up code follows it
+    uint16_t codePara = rd16(f, loadStart + 0x24);
+    if (codePara && size_t(codePara) * 16 <= codeLen) prog.codeEnd = uint16_t(codePara * 16);
     prog.dsEnd = rd16(f, loadStart + 0x10);
     // the line number table follows the code (header word +0x0A, 0 if there is none)
     uint16_t lineTab = rd16(f, loadStart + 0x0a);
@@ -166,6 +169,10 @@ LoadedProgram loadProgram(const std::string& path, bool verbose) {
     if (prog.code.size() < 0x30) throw std::runtime_error("code segment too small");
     prog.moduleName = trimRight(std::string(prog.code.begin() + 2, prog.code.begin() + 10));
     prog.flags = prog.code[0x2f];
+    prog.commonStart = prog.codeWord(0x18);
+    prog.commonSize = prog.codeWord(0x1a);
+    // variables start right at the COMMON block when there is one
+    if (prog.commonSize) prog.dsVarStart = prog.commonStart;
     prog.flags2 = prog.code[0x2e];
     if (verbose)
         std::fprintf(stderr, "module %s format %s flags %02x code %04x-%04x ds end %04x\n", prog.moduleName.c_str(),

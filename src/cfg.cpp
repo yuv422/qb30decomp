@@ -3,6 +3,7 @@
 #include "opcodes.h"
 
 #include <algorithm>
+#include <map>
 #include <cstdio>
 #include <cstring>
 
@@ -131,7 +132,9 @@ void Program::classify() {
     }
     auto resultUsed = [&](const Insn* call) {
         const Insn* in = dis_.at(call->next());
-        for (int k = 0; in && k < 3; ++k) {
+        // (the compiler may set up other operands first)
+        bool axDead = false;
+        for (int k = 0; in && k < 12; ++k) {
             if (in->isRt) {
                 const RtCall& rt = in->rt;
                 // opcodes that take the FAC as an operand
@@ -148,21 +151,27 @@ void Program::classify() {
                 return false;
             }
             // reads of AX, or BX pointing at the FAC
+            bool axWritten = false;
             for (int i = 0; i < in->zi.operand_count_visible; ++i) {
                 const ZydisDecodedOperand& op = in->ops[i];
                 if (op.type == ZYDIS_OPERAND_TYPE_REGISTER && op.reg.value == ZYDIS_REGISTER_AX &&
-                    (op.actions & ZYDIS_OPERAND_ACTION_MASK_READ))
+                    (op.actions & ZYDIS_OPERAND_ACTION_MASK_READ) && !axDead)
                     return true;
+                if (op.type == ZYDIS_OPERAND_TYPE_REGISTER && op.reg.value == ZYDIS_REGISTER_AX &&
+                    (op.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE))
+                    axWritten = true;
                 if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && (op.imm.value.u == 0x1a || op.imm.value.u == 0x16) &&
                     in->zi.mnemonic == ZYDIS_MNEMONIC_MOV)
                     return true;
             }
+            if (axWritten) axDead = true;
             if (in->isJmp() || in->isJcc() || in->isCall() || in->isRet()) return false;
             in = dis_.at(in->next());
         }
         return false;
     };
-    std::set<uint16_t> candidates;
+    std::set<uint16_t> candidates, shaped;
+    std::map<uint16_t, std::vector<uint16_t>> innerCalls;
     for (uint16_t a : dis_.callTargets()) {
         if (subs_.count(a) || fns_.count(a)) continue;
         // Instruction before must be a JMP over the function.
@@ -199,15 +208,25 @@ void Program::classify() {
                 uint16_t t;
                 if (in->isJmp() || in->isRetf()) { pure = false; break; }
                 if (in->isCall() && !(in->branchTarget(t) && t != a)) { pure = false; break; }
+                if (in->isCall()) innerCalls[a].push_back(t);
                 computes = true;
             }
             pc = in->next();
         }
         if (!pure || !sawRet || !computes) continue;
+        shaped.insert(a);
         bool used = false;
         for (const Insn* c : callSites[a])
             if (resultUsed(c)) used = true;
         if (used) candidates.insert(a);
+    }
+    // A single line DEF FN can't GOSUB: what it calls is a function as well
+    std::vector<uint16_t> work(candidates.begin(), candidates.end());
+    while (!work.empty()) {
+        uint16_t a = work.back();
+        work.pop_back();
+        for (uint16_t t : innerCalls[a])
+            if (shaped.count(t) && candidates.insert(t).second) work.push_back(t);
     }
     for (uint16_t a : candidates) fns_.insert(a);
 }
