@@ -249,6 +249,11 @@ void Disassembly::run() {
                 bool allZero = true;
                 for (uint16_t a = prevEnd; a < it->first; ++a)
                     if (prog_.code[a] != 0 && prog_.code[a] != 0x90) allZero = false;
+                // a DATA statement (NOP placeholder) or a numbered line after a jump
+                for (const DataLine& d : prog_.dataLines)
+                    if (d.key >= prevEnd && d.key < it->first) allZero = false;
+                for (const auto& ln : prog_.lineTable)
+                    if (ln.first >= prevEnd && ln.first < it->first) allZero = false;
                 if (!allZero) {
                     work_.push_back(prevEnd);
                     added = true;

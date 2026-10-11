@@ -45,8 +45,20 @@ results) and used as label names. A `' QBOPTS:` comment lists the compiler
 switches the program was compiled with (/D /E /Q /R /S /V /W /X, read from the
 executable's header; /Q is the undocumented "optimise for speed" switch).
 Unreachable code gets a label: the compiler drops statements that follow
-GOTO, RETURN or END unless a label or line number starts them. With /R (arrays in row order) subscripts are printed in
-source order.
+GOTO, RETURN or END unless a label or line number starts them. With /R
+(arrays in row order) subscripts are printed in source order.
+
+With /E or /X the compiler puts a 4 byte line table entry for every statement
+into the code segment, END IF and the GOTO of `IF ... THEN GOTO 100`
+included. Such programs get single line IFs (`IF c THEN a: b ELSE c`,
+`IF c THEN 100`) wherever the parts are plain statements: a large program
+written that way would not fit into 64K again otherwise.
+
+SUB parameters come from the calls. A SUB that is never called (an unused
+one, or one called from another module of the program) gets its parameters
+from its stack size and the array accesses in its body. Arrays passed to a
+SUB are declared with the dimensions the call passes, and UBOUND of an array
+parameter (compiled inline) is restored.
 
 The output keeps the program's memory layout where it can:
 - The COMMON block is declared with every variable at its original offset;
@@ -99,7 +111,7 @@ the output and checks the result is a fixpoint. `tests/roundtrip_exe.sh` does
 the same for existing executables, and `tests/roundtrip_project.sh` for a set
 of programs decompiled together with `-d`.
 
-Status: all 39 tests pass; 156 of the 158 sample executables in the
+Status: all 41 tests pass; 156 of the 158 sample executables in the
 quickbasic-3-disassembly repository round trip (CINT.EXE contains a patched
 opcode, SUB1F1D.EXE writes past an undeclared array).
 
@@ -113,6 +125,9 @@ opcode, SUB1F1D.EXE writes past an undeclared array).
 - Line numbers of programs compiled without /X, /E or /D are not stored in the
   executable; GOTO targets become `locXXXX` labels.
 - Programs compiled with /O (BCOM30.LIB) are not supported.
+- A program linked from several separately compiled modules (each has its own
+  "bm" header in the load image) is decompiled as its first module only; calls
+  into the other modules come out as `CALL extSSSSOOOO` (segment, offset).
 - Recompiling a program built in the QB environment ("bz" format) with
   `QB name,name;` + LINK can't reproduce its memory layout: the command-line
   compiler puts string literals after the variables instead of between them.

@@ -72,10 +72,26 @@ Program::Program(const LoadedProgram& prog, const Disassembly& dis) : prog_(prog
         buildProc(p, {a}, nullptr);
         procs_.push_back(std::move(p));
     }
-    for (const Proc& p : procs_)
+    auto ownedBy = [](const Proc& p, std::set<uint16_t>& out) {
         for (const Block& b : p.blocks)
             for (const LInsn& li : b.code)
-                for (uint16_t x = li.addr; x < li.end; ++x) claimed.insert(x);
+                for (uint16_t x = li.addr; x < li.end; ++x) out.insert(x);
+    };
+    // A SUB or multi-line DEF FN is contiguous in the code: unreachable code
+    // inside it (after a GOTO or EXIT SUB) belongs to it, not to main.
+    for (Proc& p : procs_) {
+        if (p.kind != ProcKind::Sub && p.kind != ProcKind::DefFn) continue;
+        std::set<uint16_t> others;
+        for (const Proc& q : procs_)
+            if (&q != &p) ownedBy(q, others);
+        Proc np;
+        np.entry = p.entry;
+        np.kind = p.kind;
+        np.name = p.name;
+        buildProc(np, {p.entry}, &others);
+        p = std::move(np);
+    }
+    for (const Proc& p : procs_) ownedBy(p, claimed);
 
     Proc mainp;
     mainp.kind = ProcKind::Main;
@@ -110,6 +126,10 @@ std::string Program::externalName(const Insn& call) const {
 
 void Program::classify() {
     for (uint16_t a : dis_.farCallTargets()) subs_.insert(a);
+    // SUBs that this module never calls (unused, or called from other modules
+    // linked into the same program) still start with SUB_START.
+    for (const auto& kv : dis_.insns())
+        if (kv.second.isRt && kv.second.rt.is(0x3f, 0x53)) subs_.insert(kv.first);
     for (uint16_t a : dis_.callTargets()) {
         const Insn* first = dis_.at(a);
         if (!first) continue;
@@ -346,9 +366,13 @@ void Program::buildProc(Proc& p, std::set<uint16_t> roots, const std::set<uint16
     for (;;) {
         if (work.empty()) {
             if (!claimed) break;
-            // Main program: pick up code that no procedure reached (dead code).
+            // Pick up code that no procedure reached (dead code): main takes all
+            // of it, a SUB / DEF FN what lies inside its own address range.
+            bool inner = p.kind != ProcKind::Main;
+            uint16_t hi = owned.empty() ? 0 : *owned.rbegin();
             bool found = false;
             for (const auto& kv : dis_.insns()) {
+                if (inner && (kv.first <= p.entry || kv.first >= hi)) continue;
                 if (!owned.count(kv.first) && !claimed->count(kv.first)) {
                     roots.insert(kv.first);
                     p.deadRoots.insert(kv.first);
@@ -364,6 +388,7 @@ void Program::buildProc(Proc& p, std::set<uint16_t> roots, const std::set<uint16
         work.pop_back();
         while (true) {
             if (owned.count(pc)) break;
+            if (claimed && claimed->count(pc)) break; // another procedure's code
             const Insn* in = dis_.at(pc);
             if (!in) break;
             owned.insert(pc);

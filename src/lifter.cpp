@@ -182,7 +182,43 @@ void Lifter::run(int pass) {
     impl.pass = pass;
     // DATA keys
     for (const DataLine& d : program_.prog().dataLines) info_.dataKeys.insert(d.key);
-    for (uint32_t i = 0; i < program_.procs().size(); ++i) impl.liftProc(i);
+    // Parameters of a SUB are learned from its call sites, so a SUB is lifted
+    // after the procedures that call it (QB does not allow recursion).
+    const auto& procs = program_.procs();
+    std::vector<std::set<uint32_t>> callers(procs.size());
+    for (uint32_t i = 0; i < procs.size(); ++i)
+        for (const Block& b : procs[i].blocks)
+            for (const LInsn& li : b.code) {
+                uint16_t t;
+                if (!li.insn || li.insn->isRt) continue;
+                if (!li.insn->farCallTarget(t) && !(li.insn->isCall() && li.insn->branchTarget(t))) continue;
+                if (!program_.isSub(t)) continue;
+                for (uint32_t j = 0; j < procs.size(); ++j)
+                    if (j != i && procs[j].entry == t) callers[j].insert(i);
+            }
+    std::vector<bool> done(procs.size(), false);
+    for (size_t n = 0; n < procs.size();) {
+        bool progress = false;
+        for (uint32_t i = 0; i < procs.size(); ++i) {
+            if (done[i]) continue;
+            bool ready = true;
+            for (uint32_t c : callers[i])
+                if (!done[c]) ready = false;
+            if (!ready) continue;
+            impl.liftProc(i);
+            done[i] = true;
+            ++n;
+            progress = true;
+        }
+        if (progress) continue;
+        // a call cycle: lift the rest in address order
+        for (uint32_t i = 0; i < procs.size(); ++i)
+            if (!done[i]) {
+                impl.liftProc(i);
+                done[i] = true;
+                ++n;
+            }
+    }
 }
 
 } // namespace qb

@@ -392,7 +392,9 @@ std::map<uint16_t, ArrayInfo> computeArrays(const LoadedProgram& prog, std::vect
             bytes = end > b ? end - b : uint32_t(size);
         }
         int total = int(bytes / uint32_t(size));
+        auto argDims = info.arrayArgDims.find(b);
         if (!ev.debugDims.empty()) ai.dims = ev.debugDims;
+        else if (argDims != info.arrayArgDims.end() && !prog.optR()) ai.dims = argDims->second; // passed to a SUB
         else ai.dims = inferDims(ev.offsets, size, total);
         // the same array in a program sharing the COMMON block
         for (const CommonItem& h : info.commonHints)
@@ -547,6 +549,25 @@ ProgramInfo postprocess(Program& program, std::vector<std::vector<LiftedBlock>>&
             }
             return n;
         });
+    });
+    // A dimension size word of an array parameter read outside an element
+    // access is UBOUND(param, d) + 1 (word 0 holds the last dimension).
+    forEachExprSlot(results, info, [&](ExprPtr& e, uint32_t pi) {
+        e = rewriteExpr(e, [&](const ExprPtr& n) -> ExprPtr {
+            if (n->kind != EK::Raw || n->sval != "@pdim") return n;
+            auto sit = info.subs.find(program.procs()[pi].entry);
+            if (sit == info.subs.end() || n->ival < 0 || n->ival >= int(sit->second.params.size())) return n;
+            const SubParam& sp = sit->second.params[size_t(n->ival)];
+            int dims = std::max(1, sp.dims);
+            int d = dims - int(n->addr);
+            if (d < 1) return n;
+            auto arr = std::make_shared<Expr>(*mkRaw("@paramname", sp.type));
+            arr->ival = n->ival;
+            ExprPtr ub = mkFunc("UBOUND", dims > 1 ? std::vector<ExprPtr>{arr, mkInt(d)} : std::vector<ExprPtr>{arr},
+                                Ty::Int);
+            return mkBinary(Op::Add, ub, mkInt(1), Ty::Int);
+        });
+        e = simplifyExpr(e);
     });
 
     // 4. reference counts of scalar variables

@@ -72,7 +72,10 @@ ExprPtr Lifter::Impl::dynElem(Ty t) {
     ExprPtr off = reg(DX);
     int32_t a;
     if (isIntLit(desc, &a)) return mkArrElem(uint16_t(a), t, {off}, AF_ByteOffset | AF_Dynamic);
-    if (desc->kind == EK::Param) return mkArrElem(0, t, {off}, AF_ByteOffset | AF_Dynamic | AF_Param, desc->ival);
+    if (desc->kind == EK::Param) {
+        noteBodyArrayDesc(desc, off, t);
+        return mkArrElem(0, t, {off}, AF_ByteOffset | AF_Dynamic | AF_Param, desc->ival);
+    }
     warn("unknown array descriptor");
     return mkUnknown("array", t);
 }

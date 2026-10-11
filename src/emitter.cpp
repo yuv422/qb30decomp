@@ -67,6 +67,7 @@ public:
         : program_(program), results_(results), info_(info), pinfo_(pinfo), warnings_(warnings), printer_(names_) {
         setupNames();
         setupLineNumbers();
+        singleLineIfs_ = program.prog().optE() || program.prog().optX();
     }
 
     std::string run(const DecompileOptions& opt, const std::string& inputName);
@@ -119,6 +120,8 @@ private:
     void emitBody(ProcView& v, int b, const Ctx& ctx, int ind, size_t dropTail = 0);
     void emitTerm(ProcView& v, int b, const Ctx& ctx, int ind);
     bool tryIf(ProcView& v, int i, const Ctx& ctx, int ind, int& next);
+    void collapseIfs(std::vector<OutLine>& ls);
+    bool singleLineIfs_ = false; // /E, /X: END IF costs a line table entry
     bool trySelect(ProcView& v, int i, const Ctx& ctx, int ind, int& next);
     bool tryLoop(ProcView& v, int i, const Ctx& ctx, int ind, int& next);
     bool tryFor(ProcView& v, int i, const Ctx& ctx, int ind, int& next);
@@ -447,6 +450,73 @@ bool Emitter::tryIf(ProcView& v, int i, const Ctx& ctx, int ind, int& next) {
     line(ind, "END IF");
     next = E >= 0 ? E : other;
     return true;
+}
+
+// Rewrites block IFs as single line IFs ("IF c THEN a: b ELSE c") when their
+// parts are plain statements. With /E or /X every statement, END IF included,
+// takes a line table entry in the code segment, so a program written with
+// single line IFs may only fit again in that form. Runs on the finished lines
+// (all label references known), innermost IF first.
+void Emitter::collapseIfs(std::vector<OutLine>& ls) {
+    static const char* const kBlock[] = {"IF ", "ELSEIF ", "ELSE", "END IF", "DO", "LOOP", "FOR ", "NEXT",
+                                         "WHILE ", "WEND", "SELECT ", "CASE ", "END SELECT", "DATA ", "'", "REM"};
+    auto quietLabel = [&](const OutLine& l) {
+        return l.label >= 0 && l.lineNos.empty() && !refLabels_.count(uint16_t(l.label)) &&
+               !deadLabels_.count(uint16_t(l.label));
+    };
+    for (size_t m = ls.size(); m-- > 0;) {
+        const OutLine& head = ls[m];
+        if (head.label != -1 || head.text.rfind("IF ", 0) != 0 || head.text.size() < 8 ||
+            head.text.compare(head.text.size() - 5, 5, " THEN") != 0)
+            continue;
+        int ind = head.indent;
+        std::vector<std::string> thenPart, elsePart;
+        bool inElse = false, ok = true;
+        size_t k = m + 1;
+        for (; k < ls.size(); ++k) {
+            const OutLine& l = ls[k];
+            if (quietLabel(l)) continue;
+            if (l.label != -1 || !l.lineNos.empty() || l.text.empty()) { ok = false; break; }
+            if (l.indent == ind && l.text == "END IF") break;
+            if (l.indent == ind && l.text == "ELSE" && !inElse) { inElse = true; continue; }
+            if (l.indent != ind + 1) { ok = false; break; }
+            for (const char* b : kBlock)
+                if (l.text.rfind(b, 0) == 0) ok = false;
+            if (!ok) break;
+            (inElse ? elsePart : thenPart).push_back(l.text);
+        }
+        if (!ok || k >= ls.size() || thenPart.empty() || (inElse && elsePart.empty())) continue;
+        auto join = [](const std::vector<std::string>& ss) {
+            std::string r;
+            for (const std::string& x : ss) r += (r.empty() ? "" : ": ") + x;
+            return r;
+        };
+        std::string text = head.text + " " + join(thenPart);
+        if (inElse) text += " ELSE " + join(elsePart);
+        if (text.size() > 2 * size_t(kMaxLine)) continue;
+        ls[m].text = text;
+        ls.erase(ls.begin() + long(m) + 1, ls.begin() + long(k) + 1);
+    }
+    // "IF c THEN GOTO 100" is two statements, "IF c THEN 100" one
+    auto outsideQuotes = [](const std::string& t, size_t pos) {
+        return std::count(t.begin(), t.begin() + long(pos), '"') % 2 == 0;
+    };
+    for (OutLine& l : ls) {
+        if (l.label != -1 || l.text.rfind("IF ", 0) != 0) continue;
+        for (const char* kw : {" THEN GOTO ", " ELSE GOTO "}) {
+            size_t pos = l.text.find(kw);
+            while (pos != std::string::npos) {
+                size_t d = pos + std::strlen(kw), e = d;
+                while (e < l.text.size() && std::isdigit(static_cast<unsigned char>(l.text[e]))) ++e;
+                bool target = e > d && (e == l.text.size() || l.text.compare(e, 6, " ELSE ") == 0);
+                if (target && outsideQuotes(l.text, pos)) {
+                    l.text.erase(pos + 6, 5); // drop "GOTO "
+                    break;
+                }
+                pos = l.text.find(kw, pos + 1);
+            }
+        }
+    }
 }
 
 // SELECT CASE. The selector is copied to a hidden temporary T at the end of
@@ -1393,6 +1463,11 @@ std::string Emitter::run(const DecompileOptions& opt, const std::string& inputNa
     while (!mainLines.empty() && mainLines.back().label >= 0 && mainLines.back().lineNos.empty() &&
            !refLabels_.count(uint16_t(mainLines.back().label)))
         mainLines.pop_back();
+    if (singleLineIfs_) {
+        collapseIfs(fnLines);
+        collapseIfs(mainLines);
+        collapseIfs(subLines);
+    }
     emitLines(header);
     emitLines(fnLines);
     emitLines(mainLines);

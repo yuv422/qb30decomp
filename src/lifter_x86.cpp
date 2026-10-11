@@ -57,8 +57,12 @@ static int paramIndexFor(const Proc* p, const GlobalInfo& info, int off, int* wi
     if (within) *within = 0;
     if (!p || p->kind != ProcKind::Sub || off < 6 || p->retfBytes <= 0) return -1;
     auto it = info.subs.find(p->entry);
-    // walk from the last parameter (at bp+6) upwards
-    if (it != info.subs.end() && !it->second.params.empty()) {
+    // walk from the last parameter (at bp+6) upwards (when the parameter list
+    // covers all the stack words, else number the parameters by word)
+    int listBytes = 0;
+    if (it != info.subs.end())
+        for (const SubParam& sp : it->second.params) listBytes += sp.isArray ? (4 + sp.dims) * 2 : 2;
+    if (it != info.subs.end() && !it->second.params.empty() && listBytes == p->retfBytes) {
         const auto& ps = it->second.params;
         int pos = 6;
         for (int k = int(ps.size()) - 1; k >= 0; --k) {
@@ -314,7 +318,7 @@ void Lifter::Impl::callSub(uint16_t target, const std::string& name, bool extern
         st.stack.pop_back();
     }
     // raw[0] is the last argument. Recognise array descriptors pushed on the stack.
-    struct Arg { ExprPtr ptr; bool isArray = false; bool dynamic = false; int dims = 0; int type = 0; };
+    struct Arg { ExprPtr ptr; bool isArray = false; bool dynamic = false; int dims = 0; int type = 0; int param = -1; };
     std::vector<Arg> args;
     for (size_t i = 0; i < raw.size();) {
         Arg a;
@@ -326,6 +330,18 @@ void Lifter::Impl::callSub(uint16_t target, const std::string& name, bool extern
             a.dims = (tw >> 8) & 0xff;
             a.type = tw & 0x7f;
             size_t n = size_t(4 + a.dims);
+            // the descriptor holds the size in bytes and the elements per
+            // dimension (last dimension first)
+            int32_t bytes = 0, v = 0;
+            if (pass == 1 && i + n <= raw.size() && isIntLit(raw[i + 2], &bytes) && bytes > 0) {
+                std::vector<int> sizes;
+                for (int d = 1; d <= a.dims; ++d)
+                    if (isIntLit(raw[i + 4 + size_t(a.dims - d)], &v) && v > 0) sizes.push_back(v);
+                if (int(sizes.size()) == a.dims) {
+                    info.arrayArgDims[uint16_t(addr)] = sizes;
+                    info.arrayBytes[uint16_t(addr)] = uint16_t(bytes);
+                }
+            }
             i += std::min(n, raw.size() - i);
         } else if (raw[i] && raw[i]->kind == EK::Raw && raw[i]->sval == "@descword" && raw[i]->ival == 0) {
             // $DYNAMIC array: its descriptor was copied onto the stack
@@ -340,6 +356,24 @@ void Lifter::Impl::callSub(uint16_t target, const std::string& name, bool extern
             while (i + n < raw.size() && raw[i + n] && raw[i + n]->kind == EK::Raw && raw[i + n]->sval == "@descword" &&
                    raw[i + n]->addr == desc)
                 ++n;
+            i += n;
+        } else if (raw[i] && raw[i]->kind == EK::Raw && raw[i]->sval == "@pdescword" && raw[i]->addr == 0) {
+            // an array parameter of the calling SUB passed on
+            int k = int(raw[i]->ival);
+            a.isArray = true;
+            a.param = k;
+            auto cur = proc ? info.subs.find(proc->entry) : info.subs.end();
+            if (cur != info.subs.end() && k < int(cur->second.params.size())) {
+                const SubParam& cp = cur->second.params[size_t(k)];
+                a.dims = cp.dims;
+                Ty t = cp.type;
+                a.type = t == Ty::Int ? 1 : t == Ty::Sng ? 2 : t == Ty::Dbl ? 3 : t == Ty::Str ? 4 : 0;
+            }
+            size_t n = 0;
+            while (i + n < raw.size() && raw[i + n] && raw[i + n]->kind == EK::Raw && raw[i + n]->sval == "@pdescword" &&
+                   raw[i + n]->ival == k && raw[i + n]->addr == n)
+                ++n;
+            if (!a.dims) a.dims = std::max(1, int(n) - 4);
             i += n;
         } else {
             ++i;
@@ -362,6 +396,13 @@ void Lifter::Impl::callSub(uint16_t target, const std::string& name, bool extern
             static const Ty kTypes[] = {Ty::Unknown, Ty::Int, Ty::Sng, Ty::Dbl, Ty::Str};
             Ty t = kTypes[a.type];
             sp2.type = t;
+            if (a.param >= 0) {
+                auto e = std::make_shared<Expr>(*mkRaw("@paramarray", t));
+                e->ival = a.param;
+                argExprs.push_back(e);
+                observed.params.push_back(sp2);
+                continue;
+            }
             int32_t addr = 0;
             isIntLit(a.ptr, &addr);
             argExprs.push_back(mkRaw(std::string("@arrayarg"), t));
@@ -374,6 +415,9 @@ void Lifter::Impl::callSub(uint16_t target, const std::string& name, bool extern
         } else {
             Ty t = Ty::Unknown;
             if (si && k < si->params.size()) t = si->params[k].type;
+            if (pass == 1 && !external && proc && proc->kind == ProcKind::Sub && a.ptr && a.ptr->kind == EK::Param &&
+                a.ptr->flags == 0)
+                info.paramPassThrough.push_back({proc->entry, int(a.ptr->ival), target, int(k)});
             ExprPtr v = deref(a.ptr, t);
             sp2.type = v->type;
             argExprs.push_back(v);
@@ -606,7 +650,19 @@ void Lifter::Impl::execX86(const Insn& in) {
         // "rep movsw" copies a $DYNAMIC array descriptor onto the stack for CALL
         int32_t desc;
         auto dit = isIntLit(reg(SI), &desc) ? info.dynDims.find(uint16_t(desc)) : info.dynDims.end();
-        if ((z.attributes & ZYDIS_ATTRIB_HAS_REP) && dit != info.dynDims.end()) {
+        ExprPtr si = reg(SI);
+        int32_t cnt = 0;
+        if ((z.attributes & ZYDIS_ATTRIB_HAS_REP) && si->kind == EK::Param && si->flags == 1 && isIntLit(reg(CX), &cnt) &&
+            cnt > 0 && cnt <= 12) {
+            // a SUB passes its own array parameter on: the descriptor block of
+            // the parameter is copied onto the stack
+            for (int w = cnt - 1; w >= 0; --w) {
+                auto e = std::make_shared<Expr>(*mkRaw("@pdescword", Ty::Int));
+                e->ival = si->ival;
+                e->addr = uint16_t(w);
+                st.stack.push_back(Val{e, nullptr});
+            }
+        } else if ((z.attributes & ZYDIS_ATTRIB_HAS_REP) && dit != info.dynDims.end()) {
             int words = 4 + dit->second;
             for (int w = words - 1; w >= 0; --w) {
                 auto e = std::make_shared<Expr>(*mkRaw("@descword", Ty::Int));

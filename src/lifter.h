@@ -71,6 +71,12 @@ struct GlobalInfo {
     std::map<uint16_t, Ty> staticArrays;      // static arrays seen in ERASE
     std::vector<CommonItem> commonHints;      // COMMON variables known from programs sharing the block
     std::map<uint16_t, uint32_t> arrayExtent; // static array base -> estimated size (after pass 1)
+    struct PassThrough { uint16_t caller; int callerParam; uint16_t callee; int calleeParam; };
+    std::vector<PassThrough> paramPassThrough; // a SUB passing its own scalar parameter on (pass 1)
+    std::map<uint16_t, std::vector<int>> arrayArgDims; // static array passed to a SUB -> elements per dimension
+    // SUBs without call sites: array parameters seen in the body (pass 1)
+    struct BodyArray { int dims = 1; Ty type = Ty::Unknown; };
+    std::map<uint16_t, std::map<int, BodyArray>> bodyArrays; // sub -> frame offset of data word -> array
 };
 
 class Lifter {

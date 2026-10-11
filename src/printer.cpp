@@ -354,6 +354,8 @@ std::string Printer::expr(const ExprPtr& e, int parentPrec, bool rightSide, Ty w
     case EK::Raw:
         if (e->sval == "@array") return names_.array(e->addr, e->type);
         if (e->sval == "@arrayarg") return names_.array(e->addr, e->type) + "()";
+        if (e->sval == "@paramarray") return names_.param(int(e->ival), e->type) + "()";
+        if (e->sval == "@paramname") return names_.param(int(e->ival), e->type);
         return e->sval;
     case EK::Unknown:
         if (std::getenv("QBDEBUG")) return "???<" + e->sval + ">";

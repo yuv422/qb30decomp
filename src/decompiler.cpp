@@ -38,6 +38,76 @@ void prescanArrays(const Disassembly& dis, GlobalInfo& info) {
     }
 }
 
+// Parameter list of a SUB that is never called in this module (it may be
+// called from another module linked into the program): stack words, with the
+// array parameters seen in its body (pass 1) taking 4 + dims words each.
+void inferBodyArrayParams(const Program& program, GlobalInfo& info) {
+    for (const auto& kv : info.bodyArrays) {
+        const Proc* p = program.procAt(kv.first);
+        if (!p || p->retfBytes <= 0 || info.subCallArgs.count(kv.first)) continue;
+        int words = p->retfBytes / 2;
+        int end = 6 + 2 * words;
+        SubInfo& si = info.subs[kv.first];
+        std::vector<SubParam> old = si.params; // indexed by stack word (last parameter = last word)
+        std::vector<SubParam> rev;              // from the last parameter (bp+6) up
+        bool ok = true;
+        for (int off = 6; off < end;) {
+            auto a = kv.second.find(off);
+            if (a != kv.second.end()) {
+                int size = (4 + a->second.dims) * 2;
+                if (off + size > end) { ok = false; break; }
+                SubParam sp;
+                sp.isArray = true;
+                sp.dims = a->second.dims;
+                sp.type = a->second.type;
+                rev.push_back(sp);
+                off += size;
+            } else {
+                size_t k = size_t(words - 1 - (off - 6) / 2);
+                rev.push_back(k < old.size() ? old[k] : SubParam());
+                off += 2;
+            }
+        }
+        if (!ok) continue;
+        si.params.assign(rev.rbegin(), rev.rend());
+    }
+}
+
+// A SUB that passes its own parameter on to another SUB: both have the same type.
+void propagatePassThroughTypes(GlobalInfo& info) {
+    auto param = [&](uint16_t sub, int k) -> SubParam* {
+        auto it = info.subs.find(sub);
+        if (it == info.subs.end() || k < 0 || k >= int(it->second.params.size())) return nullptr;
+        SubParam* p = &it->second.params[size_t(k)];
+        return p->isArray ? nullptr : p;
+    };
+    // a variable argument whose type only became known later in pass 1
+    for (const auto& kv : info.subCallArgs)
+        for (const auto& args : kv.second)
+            for (size_t k = 0; k < args.size(); ++k) {
+                SubParam* p = param(kv.first, int(k));
+                const ExprPtr& a = args[k];
+                if (!p || p->type != Ty::Unknown || !a || a->kind != EK::Var || a->type != Ty::Unknown) continue;
+                auto vt = info.varTypes.find(a->addr);
+                if (vt == info.varTypes.end()) continue;
+                std::set<Ty> known;
+                for (Ty t : vt->second)
+                    if (t != Ty::Unknown) known.insert(t);
+                if (known.size() == 1) p->type = *known.begin();
+            }
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (const auto& pt : info.paramPassThrough) {
+            SubParam* a = param(pt.caller, pt.callerParam);
+            SubParam* b = param(pt.callee, pt.calleeParam);
+            if (!a || !b || (a->type == Ty::Unknown) == (b->type == Ty::Unknown)) continue;
+            if (a->type == Ty::Unknown) a->type = b->type;
+            else b->type = a->type;
+            changed = true;
+        }
+    }
+}
+
 // DEF FN parameters: variables that are stored right before every call of the
 // function, read by its body and not read anywhere else.
 void analyzeFns(const Program& program, GlobalInfo& info) {
@@ -133,6 +203,8 @@ DecompileResult decompile(const LoadedProgram& prog, const DecompileOptions& opt
 
     Lifter lifter(program, info);
     lifter.run(1);
+    inferBodyArrayParams(program, info);
+    propagatePassThroughTypes(info);
     analyzeFns(program, info);
     {
         std::map<uint16_t, std::set<Ty>> vt;

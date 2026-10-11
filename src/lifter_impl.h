@@ -6,6 +6,7 @@
 #include "simplify.h"
 
 #include <algorithm>
+#include <numeric>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -222,6 +223,7 @@ struct Lifter::Impl {
             break;
         case EK::Binary:
             if (p->op == Op::Add || p->op == Op::Sub) {
+                noteBodyArray(p, t);
                 // dynamic string array: [descriptor] + offset (the constant part of
                 // the offset may have been folded to the top of the sum)
                 Linear l = toLinear(p);
@@ -237,7 +239,9 @@ struct Lifter::Impl {
                     if (l.terms[k].second == 1 && d->kind == EK::Param && d->flags == 0 && isArrayParam(d->ival)) {
                         Linear rest = l;
                         rest.terms.erase(rest.terms.begin() + long(k));
-                        return mkArrElem(0, t, {fromLinear(rest)}, AF_ByteOffset | AF_Dynamic | AF_Param, d->ival);
+                        Ty et = t;
+                        if (et == Ty::Unknown) et = info.subs.at(proc->entry).params[size_t(d->ival)].type;
+                        return mkArrElem(0, et, {fromLinear(rest)}, AF_ByteOffset | AF_Dynamic | AF_Param, d->ival);
                     }
                 }
                 int32_t base = 0;
@@ -360,7 +364,9 @@ struct Lifter::Impl {
                 }
                 break;
             case EK::Param:
-                if (n->type != Ty::Unknown) hit = true; // a parameter may refer to any variable
+                // a parameter may refer to any variable of the caller (not to one
+                // that only this SUB uses)
+                if (n->type != Ty::Unknown && !isLocalVar(addr)) hit = true;
                 break;
             case EK::FnCall:
                 hit = fnReadsRange(n->addr, addr, size);
@@ -512,6 +518,55 @@ struct Lifter::Impl {
         }
         phiStores.push_back({value->addr, lhs, value->ival});
         return nullptr;
+    }
+
+    // A SUB that is never called (here) has no parameter list; an element access
+    // [data word] + index * size (* [dimension word]) shows an array parameter.
+    // Parameters are still numbered by stack word in pass 1.
+    void noteBodyArray(const ExprPtr& p, Ty t) {
+        if (pass != 1 || !proc || proc->kind != ProcKind::Sub || proc->retfBytes <= 0) return;
+        if (info.subCallArgs.count(proc->entry)) return;
+        int words = proc->retfBytes / 2;
+        auto offOf = [&](int k) { return 6 + 2 * (words - 1 - k); };
+        Linear l = toLinear(p);
+        int data = -1;
+        for (const auto& tm : l.terms)
+            if (tm.second == 1 && tm.first->kind == EK::Param && tm.first->flags == 0) {
+                if (data >= 0) return;
+                data = offOf(tm.first->ival);
+            }
+        if (data < 0 || (l.terms.size() < 2 && l.constant <= 0)) return;
+        int dims = 1;
+        for (const auto& tm : l.terms)
+            walkExpr(tm.first, [&](const ExprPtr& n) {
+                if (n->kind != EK::Param || n == tm.first) return;
+                int o = offOf(n->ival);
+                if (o >= data + 8) dims = std::max(dims, (o - data - 8) / 2 + 1);
+            });
+        noteBodyArrayAt(data, dims, t);
+    }
+    void noteBodyArrayAt(int data, int dims, Ty t) {
+        auto& ba = info.bodyArrays[proc->entry][data];
+        ba.dims = std::max(ba.dims, dims);
+        if (t != Ty::Unknown) ba.type = t;
+    }
+    // Array runtime call with BX = address of a parameter's descriptor block and
+    // DX = byte offset of the element.
+    void noteBodyArrayDesc(const ExprPtr& desc, const ExprPtr& off, Ty t) {
+        if (pass != 1 || !proc || proc->kind != ProcKind::Sub || proc->retfBytes <= 0) return;
+        if (info.subCallArgs.count(proc->entry) || desc->kind != EK::Param || desc->flags != 1) return;
+        int words = proc->retfBytes / 2;
+        int data = 6 + 2 * (words - 1 - int(desc->ival));
+        if (t == Ty::Unknown && off) {
+            // element type from the element size
+            Linear l = toLinear(off);
+            int g = 0;
+            for (const auto& tm : l.terms) g = std::gcd(g, std::abs(int(tm.second)));
+            if (g == 2) t = Ty::Int;
+            else if (g == 8) t = Ty::Dbl;
+            else if (g == 4) t = Ty::Sng;
+        }
+        noteBodyArrayAt(data, 1, t);
     }
 
     // ---- variable access bookkeeping (pass 1)
