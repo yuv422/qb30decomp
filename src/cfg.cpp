@@ -351,6 +351,7 @@ void Program::buildProc(Proc& p, std::set<uint16_t> roots, const std::set<uint16
             for (const auto& kv : dis_.insns()) {
                 if (!owned.count(kv.first) && !claimed->count(kv.first)) {
                     roots.insert(kv.first);
+                    p.deadRoots.insert(kv.first);
                     leaders.insert(kv.first);
                     push(kv.first);
                     found = true;

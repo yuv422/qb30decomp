@@ -146,6 +146,7 @@ private:
     Printer printer_;
     std::vector<OutLine> out_;
     std::set<uint16_t> refLabels_;
+    std::set<uint16_t> deadLabels_; // starts of unreachable code
     std::map<uint16_t, uint16_t> labelCanon_; // address -> address of the live block that holds the label
     std::map<uint16_t, std::vector<uint16_t>> lineAt_; // code address -> line numbers starting there
     std::vector<uint16_t> pendingLines_;               // line numbers for the next output line
@@ -1144,6 +1145,7 @@ std::string Emitter::run(const DecompileOptions& opt, const std::string& inputNa
     std::string opts;
     if (prog.debugBuild()) opts += " /D";
     if (prog.optE() || onError || resumeNext) opts += " /E";
+    if (prog.opcodePadding()) opts += " /Q"; // optimise for speed (undocumented switch)
     if (prog.optR()) opts += " /R";
     if (prog.optS()) opts += " /S";
     if (prog.optV()) opts += " /V";
@@ -1297,6 +1299,9 @@ std::string Emitter::run(const DecompileOptions& opt, const std::string& inputNa
     if (anyDynamic) header.push_back({0, "REM $DYNAMIC", -1});
 
     for (uint32_t pi = 0; pi < program_.procs().size(); ++pi) makeView(pi);
+    // The compiler drops statements after GOTO/RETURN/END up to the next label or
+    // line number, so unreachable code keeps a label to survive recompilation.
+    for (const Proc& p : program_.procs()) deadLabels_.insert(p.deadRoots.begin(), p.deadRoots.end());
     // DEF FN definitions come first so that they precede their use
     std::vector<OutLine> fnLines;
     for (uint32_t pi = 0; pi < program_.procs().size(); ++pi) {
@@ -1333,7 +1338,7 @@ std::string Emitter::run(const DecompileOptions& opt, const std::string& inputNa
                 if (doneLines.insert(n).second) pend.push_back(n);
             if (l.label == -2) continue;
             if (l.label >= 0) {
-                if (l.lineNos.empty() && refLabels_.count(uint16_t(l.label))) {
+                if (l.lineNos.empty() && (refLabels_.count(uint16_t(l.label)) || deadLabels_.count(uint16_t(l.label)))) {
                     flushBare();
                     text += "loc" + hex4(uint16_t(l.label)) + ":\n";
                 }
@@ -1384,6 +1389,10 @@ std::string Emitter::run(const DecompileOptions& opt, const std::string& inputNa
             mainLines.insert(mainLines.begin(), reset.begin(), reset.end());
         }
     }
+    // unreachable code at the very end is just the program end: no label needed
+    while (!mainLines.empty() && mainLines.back().label >= 0 && mainLines.back().lineNos.empty() &&
+           !refLabels_.count(uint16_t(mainLines.back().label)))
+        mainLines.pop_back();
     emitLines(header);
     emitLines(fnLines);
     emitLines(mainLines);

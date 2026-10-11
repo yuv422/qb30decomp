@@ -64,6 +64,7 @@ struct Proc {
     std::vector<Block> blocks;           // address order
     std::map<uint16_t, uint32_t> blockAt; // start address -> block index
     std::set<uint16_t> gosubTargets;     // GOSUB / ON GOSUB / event handler targets inside
+    std::set<uint16_t> deadRoots;        // starts of unreachable code (main only)
     int retfBytes = -1;                  // SUB: bytes of arguments removed by RETF n
     uint16_t lowAddr = 0xffff, highAddr = 0;
 

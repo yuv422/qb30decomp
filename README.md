@@ -42,8 +42,10 @@ Variables are named `variXXXX` after their DS address with a type suffix
 DEF FN functions `FNfXXXX`. Programs compiled with /X, /E or /D carry a line
 number table; their line numbers are restored (so ERL and TRON give the same
 results) and used as label names. A `' QBOPTS:` comment lists the compiler
-switches the program was compiled with (/D /E /R /S /V /W /X, read from the
-executable's header). With /R (arrays in row order) subscripts are printed in
+switches the program was compiled with (/D /E /Q /R /S /V /W /X, read from the
+executable's header; /Q is the undocumented "optimise for speed" switch).
+Unreachable code gets a label: the compiler drops statements that follow
+GOTO, RETURN or END unless a label or line number starts them. With /R (arrays in row order) subscripts are printed in
 source order.
 
 The output keeps the program's memory layout where it can:
@@ -97,7 +99,7 @@ the output and checks the result is a fixpoint. `tests/roundtrip_exe.sh` does
 the same for existing executables, and `tests/roundtrip_project.sh` for a set
 of programs decompiled together with `-d`.
 
-Status: all 35 tests pass; 156 of the 158 sample executables in the
+Status: all 39 tests pass; 156 of the 158 sample executables in the
 quickbasic-3-disassembly repository round trip (CINT.EXE contains a patched
 opcode, SUB1F1D.EXE writes past an undeclared array).
 
@@ -111,9 +113,13 @@ opcode, SUB1F1D.EXE writes past an undeclared array).
 - Line numbers of programs compiled without /X, /E or /D are not stored in the
   executable; GOTO targets become `locXXXX` labels.
 - Programs compiled with /O (BCOM30.LIB) are not supported.
-- Recompiling a program built in the QB environment ("bz" format) with the
-  command-line compiler can't reproduce it exactly. The command-line compiler
-  puts string literals after the variables instead of between them, leaves out
-  unreachable code, and only writes a line number table with /E or /X. A
-  second decompile of such a program can therefore differ (adjacent arrays may
-  merge into one), although it behaves the same.
+- Recompiling a program built in the QB environment ("bz" format) with
+  `QB name,name;` + LINK can't reproduce its memory layout: the command-line
+  compiler puts string literals after the variables instead of between them.
+  A second decompile can therefore differ (adjacent arrays may merge into
+  one), although it behaves the same. The undocumented `QB name /F [options]`
+  switch compiles straight to a bz executable like the environment does
+  (literals between the variables, no OBJ or LINK step). It differs from an
+  environment build only in header bit 2Eh/80h and in the line number
+  table: the environment writes one for every program with line numbers,
+  /F only with /E, /X or /D.
